@@ -77,7 +77,9 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
         return tasks
 
     # Handle recurring tasks
-    current_date = datetime.fromisoformat(rule['startDate']).date()
+    start_date_obj = datetime.fromisoformat(rule['startDate']).date()
+    # FIX: The first due date is one frequency period AFTER the start date.
+    current_date = get_next_date(start_date_obj, rule['frequency'])
     end_date = datetime.fromisoformat(rule['endDate']).date()
 
     while current_date <= end_date:
