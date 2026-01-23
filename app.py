@@ -480,4 +480,3 @@ def serve_react_app(path):
         return send_from_directory(app.static_folder, 'index.html')--- START OF FILE Procfile ---
 
 
-web: gunicorn --timeout 120 backend.app:app
