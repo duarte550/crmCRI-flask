@@ -56,7 +56,8 @@ def fetch_full_operation(cursor, operation_id):
     operation_db = format_row(op_row, cursor)
 
     operation = {
-        'id': operation_db['id'], 'name': operation_db['name'], 'operationType': operation_db['operation_type'],
+        'id': operation_db['id'], 'name': operation_db['name'], 'area': operation_db['area'],
+        'operationType': operation_db['operation_type'],
         'maturityDate': operation_db['maturity_date'].isoformat() if operation_db.get('maturity_date') else None,
         'responsibleAnalyst': operation_db['responsible_analyst'], 'reviewFrequency': operation_db['review_frequency'],
         'callFrequency': operation_db['call_frequency'], 'dfFrequency': operation_db['df_frequency'],
@@ -182,7 +183,8 @@ def manage_operations_collection():
                 for op_db in operations_db:
                     op_id = op_db['id']
                     operation = {
-                        'id': op_id, 'name': op_db['name'], 'operationType': op_db['operation_type'], 'maturityDate': op_db['maturity_date'].isoformat() if op_db.get('maturity_date') else None, 'responsibleAnalyst': op_db['responsible_analyst'], 'reviewFrequency': op_db['review_frequency'], 'callFrequency': op_db['call_frequency'], 'dfFrequency': op_db['df_frequency'], 'segmento': op_db['segmento'], 'ratingOperation': op_db['rating_operation'], 'ratingGroup': op_db['rating_group'], 'watchlist': op_db['watchlist'], 'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
+                        'id': op_id, 'name': op_db['name'], 'area': op_db['area'],
+                        'operationType': op_db['operation_type'], 'maturityDate': op_db['maturity_date'].isoformat() if op_db.get('maturity_date') else None, 'responsibleAnalyst': op_db['responsible_analyst'], 'reviewFrequency': op_db['review_frequency'], 'callFrequency': op_db['call_frequency'], 'dfFrequency': op_db['df_frequency'], 'segmento': op_db['segmento'], 'ratingOperation': op_db['rating_operation'], 'ratingGroup': op_db['rating_group'], 'watchlist': op_db['watchlist'], 'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
                         'defaultMonitoring': {'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'], 'operationalInfo': op_db['monitoring_operational_info'], 'receivablesPortfolio': op_db['monitoring_receivables_portfolio'], 'monthlyConstructionReport': op_db['monitoring_construction_report'], 'monthlyCommercialInfo': op_db['monitoring_commercial_info'], 'speDfs': op_db['monitoring_spe_dfs']},
                         'projects': projects_by_op_id[op_id], 'guarantees': guarantees_by_op_id[op_id], 'events': events_by_op_id[op_id], 'taskRules': rules_by_op_id[op_id], 'ratingHistory': history_by_op_id[op_id]
                     }
@@ -206,8 +208,8 @@ def manage_operations_collection():
                 # Insert main operation and get its ID
                 dm = data.get('defaultMonitoring', {})
                 cursor.execute(
-                    "INSERT INTO cri.crm.operations (name, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (data['name'], data['operationType'], data['maturityDate'], data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'))
+                    "INSERT INTO cri.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (data['name'], data['area'], data['operationType'], data['maturityDate'], data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'))
                 )
                 cursor.execute("SELECT id FROM cri.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
                 new_op_id = cursor.fetchone().id
@@ -223,7 +225,7 @@ def manage_operations_collection():
                 
                 cursor.execute("INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, sentiment) VALUES (?, ?, ?, ?, ?)", (new_op_id, today, data['ratingOperation'], data['ratingGroup'], 'Neutro'))
                 
-                log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'Operation', new_op_id, f"Operação '{data['name']}' criada.")
+                log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'Operation', new_op_id, f"Operação '{data['name']}' criada na área '{data['area']}'.")
             conn.commit()
             
             with conn.cursor() as cursor:
@@ -249,6 +251,7 @@ def manage_operation(op_id):
                 old_op_db = format_row(cursor.fetchone(), cursor) if cursor.rowcount > 0 else {}
                 old_data_for_diff = {
                     'name': old_op_db.get('name'),
+                    'area': old_op_db.get('area'),
                     'ratingOperation': old_op_db.get('rating_operation'),
                     'ratingGroup': old_op_db.get('rating_group'),
                     'watchlist': old_op_db.get('watchlist'),
@@ -260,10 +263,10 @@ def manage_operation(op_id):
                 cursor.execute(
                     """
                     UPDATE cri.crm.operations 
-                    SET name = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? 
+                    SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? 
                     WHERE id = ?
                     """, 
-                    (data['name'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id)
+                    (data['name'], data['area'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id)
                 )
                 
                 # Sync Events
@@ -286,7 +289,7 @@ def manage_operation(op_id):
                 # Sync Task Rules
                 cursor.execute("SELECT id, name FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                 db_rules_map = {row.id: row.name for row in cursor.fetchall()}
-                client_rule_ids = {r['id'] for r in data.get('taskRules', []) if isinstance(r.get('id'), int)}
+                client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
 
                 for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
                     cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
@@ -305,7 +308,7 @@ def manage_operation(op_id):
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule['name']}' adicionada à operação '{data['name']}'.")
 
                 # Log general operation changes
-                details = generate_diff_details(old_data_for_diff, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist', 'covenants.ltv': 'LTV', 'covenants.dscr': 'DSCR'})
+                details = generate_diff_details(old_data_for_diff, data, {'name': 'Nome', 'area': 'Área', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist', 'covenants.ltv': 'LTV', 'covenants.dscr': 'DSCR'})
                 if details: 
                     log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
             
