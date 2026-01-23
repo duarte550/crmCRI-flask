@@ -7,7 +7,68 @@ from task_engine import generate_tasks_for_operation
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 import json
+import concurrent.futures
+import logging
 
+
+logger = logging.getLogger(__name__)
+def run_with_timeout(func, timeout=10, *args, **kwargs):
+    """
+    Executa func(*args, **kwargs) num ThreadPoolExecutor e retorna o resultado.
+    Lança concurrent.futures.TimeoutError se exceder o timeout.
+    Usar para proteger chamadas de cursor.execute() que possam bloquear.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(func, *args, **kwargs)
+        return future.result(timeout=timeout)
+
+# ... (manter/colocar o helper acima perto do topo do arquivo)
+
+# Exemplo mínimo de aplicação dentro do endpoint /api/operations/<id>
+@app.route('/api/operations/<int:op_id>', methods=['PUT', 'DELETE'])
+def manage_operation(op_id):
+    conn = get_db_connection()
+    if request.method == 'PUT':
+        try:
+            data = request.json
+            with conn.cursor() as cursor:
+
+                # Protege a SELECT inicial com timeout
+                def fetch_old_op():
+                    cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
+                    return cursor.fetchone()
+
+                try:
+                    row = run_with_timeout(fetch_old_op, timeout=12)  # timeout em segundos (ajustar conforme necessário)
+                except concurrent.futures.TimeoutError:
+                    logger.error("DB query timed out while fetching operation id=%s", op_id)
+                    return jsonify({"error": "database timeout"}), 504
+
+                old_op_db = format_row(row, cursor) if row else {}
+                old_rating_group = old_op_db.get('rating_group')
+                new_rating_group = data['ratingGroup']
+
+                # ... restante do código inalterado, considerar envolver outras chamadas críticas em run_with_timeout
+
+            conn.commit()
+
+            with conn.cursor() as cursor:
+                def fetch_full():
+                    return fetch_full_operation(cursor, op_id)
+                try:
+                    new_operation_full = run_with_timeout(fetch_full, timeout=12)
+                except concurrent.futures.TimeoutError:
+                    logger.error("DB query timed out while fetching full operation id=%s", op_id)
+                    return jsonify({"error": "database timeout fetching operation"}), 504
+
+            return jsonify(new_operation_full), 200
+
+        except Exception as e:
+            logger.exception("Erro ao manipular operação %s: %s", op_id, e)
+            return jsonify({"error": "internal server error"}), 500
+        finally:
+            if conn:
+                conn.close()
 # Configura o Flask para servir os arquivos estáticos da pasta raiz do projeto
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'), static_url_path='')
 
