@@ -112,7 +112,9 @@ def manage_operations_collection():
                     if not proj_id:
                         cursor.execute("INSERT INTO cri.crm.projects (name) VALUES (?)", (proj['name'],))
                         cursor.execute("SELECT id FROM cri.crm.projects WHERE name = ? ORDER BY id DESC LIMIT 1", (proj['name'],))
-                        proj_id = cursor.fetchone().id
+                        new_proj_row = cursor.fetchone()
+                        if not new_proj_row: raise Exception(f"Failed to create and retrieve project '{proj['name']}'")
+                        proj_id = new_proj_row.id
                     cursor.execute("INSERT INTO cri.crm.operation_projects (operation_id, project_id) VALUES (?, ?)", (new_op_id, proj_id))
 
                 for guar in data.get('guarantees', []):
@@ -122,7 +124,9 @@ def manage_operations_collection():
                     if not guar_id:
                         cursor.execute("INSERT INTO cri.crm.guarantees (name) VALUES (?)", (guar['name'],))
                         cursor.execute("SELECT id FROM cri.crm.guarantees WHERE name = ? ORDER BY id DESC LIMIT 1", (guar['name'],))
-                        guar_id = cursor.fetchone().id
+                        new_guar_row = cursor.fetchone()
+                        if not new_guar_row: raise Exception(f"Failed to create and retrieve guarantee '{guar['name']}'")
+                        guar_id = new_guar_row.id
                     cursor.execute("INSERT INTO cri.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (new_op_id, guar_id))
 
                 today = datetime.now()
