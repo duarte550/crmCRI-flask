@@ -148,18 +148,19 @@ def fetch_full_operation(cursor, operation_id):
 # ================== Rotas da API ==================
 
 @app.route('/api/operations', methods=['GET', 'POST'])
-@app.route('/api/operations', methods=['GET', 'POST'])
 def operations():
     conn = get_db_connection()
-
     if request.method == 'GET':
         try:
+            # Colocar toda a lógica de leitura do DB dentro de uma função que chamaremos com timeout
             def fetch_all_ops():
                 with conn.cursor() as cursor:
                     # --- Otimização "1+N": Busca todas as operações e depois os dados relacionados em lotes ---
+                    
+                    # 1. Busca todas as operações base
                     cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
                     operations_list = [format_row(row, cursor) for row in cursor.fetchall()]
-
+                    
                     if not operations_list:
                         return []
 
@@ -192,14 +193,14 @@ def operations():
                         operations_map[row.operation_id]['events'].append(event)
 
                     cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
-                    for row in cursor.fetchall():
+                    for row in cursor.fetchall(): 
                         rule = format_row(row, cursor)
                         if rule.get('startDate'): rule['startDate'] = rule['startDate'].isoformat()
                         if rule.get('endDate'): rule['endDate'] = rule['endDate'].isoformat()
                         operations_map[row.operation_id]['taskRules'].append(rule)
 
                     cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
-                    for row in cursor.fetchall():
+                    for row in cursor.fetchall(): 
                         rh = format_row(row, cursor)
                         if rh.get('date'): rh['date'] = rh['date'].isoformat()
                         operations_map[row.operation_id]['ratingHistory'].append(rh)
@@ -290,68 +291,86 @@ def manage_operation(op_id):
     conn = get_db_connection()
     if request.method == 'PUT':
         try:
-            data = request.json
-            with conn.cursor() as cursor:
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                logger.warning("PUT /api/operations/%s - body is not a valid JSON", op_id)
+                return jsonify({"error": "invalid or missing JSON body"}), 400
 
-                # Protege a SELECT inicial com timeout
+            with conn.cursor() as cursor:
+                # Busca a operação antiga (protegido por timeout)
                 def fetch_old_op():
                     cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
                     return cursor.fetchone()
 
                 try:
-                    row = run_with_timeout(fetch_old_op, timeout=12)  # timeout em segundos (ajustar conforme necessário)
+                    row = run_with_timeout(fetch_old_op, timeout=12)
                 except concurrent.futures.TimeoutError:
                     logger.error("DB query timed out while fetching operation id=%s", op_id)
                     return jsonify({"error": "database timeout"}), 504
 
-                old_op_db = format_row(row, cursor) if row else {}
+                if not row:
+                    return jsonify({"error": "operation not found"}), 404
+
+                old_op_db = format_row(row, cursor)
                 old_rating_group = old_op_db.get('rating_group')
-                new_rating_group = data['ratingGroup']
-                
-                if old_rating_group != new_rating_group:
+
+                # Para updates parciais: use valor enviado ou mantenha o valor antigo
+                name = data.get('name', old_op_db.get('name'))
+                area = data.get('area', old_op_db.get('area'))
+                rating_operation = data.get('ratingOperation', old_op_db.get('rating_operation'))
+                rating_group = data.get('ratingGroup', old_op_db.get('rating_group'))
+                watchlist = data.get('watchlist', old_op_db.get('watchlist'))
+                cov = data.get('covenants', {})
+                ltv = cov.get('ltv', old_op_db.get('ltv'))
+                dscr = cov.get('dscr', old_op_db.get('dscr'))
+
+                # Se o front enviar listas, use-as, senão considere listas vazias
+                events = data.get('events', [])
+                rating_history = data.get('ratingHistory', [])
+                task_rules = data.get('taskRules', [])
+
+                # Detecta mudança de rating_group para lógica adicional
+                if old_rating_group != rating_group:
                     cursor.execute("SELECT name, frequency, start_date FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                     all_rules = {row.name: {'frequency': row.frequency, 'start_date': row.start_date} for row in cursor.fetchall()}
                     
                     cursor.execute("SELECT type, MAX(date) as max_date FROM cri.crm.events WHERE operation_id = ? AND type = 'Revisão Periódica' GROUP BY type", (op_id,))
                     last_review_date_row = cursor.fetchone()
 
-                # 1. UPDATE operations table
-                cov = data.get('covenants', {})
+                # 1. UPDATE operations table (usar variáveis seguras)
                 cursor.execute(
-                    "UPDATE cri.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?", 
-                    (data['name'], data['area'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id)
+                    "UPDATE cri.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?",
+                    (name, area, rating_operation, rating_group, watchlist, ltv, dscr, op_id)
                 )
-                
+
                 # 2. INSERT events (novos)
-                for event in data.get('events', []):
+                for event in events:
                     if not isinstance(event.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                       (op_id, event['date'], event['type'], event['title'], event['description'], event['registeredBy'], event['nextSteps'], event.get('completedTaskId')))
+                                       (op_id, event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId')))
 
                 # 3. INSERT rating_history entries (novos)
-                for rh in data.get('ratingHistory', []):
+                for rh in rating_history:
                     if not isinstance(rh.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                       (op_id, rh['date'], rh['ratingOperation'], rh['ratingGroup'], rh['watchlist'], rh['sentiment'], rh['eventId']))
+                                       (op_id, rh.get('date'), rh.get('ratingOperation'), rh.get('ratingGroup'), rh.get('watchlist'), rh.get('sentiment'), rh.get('eventId')))
 
-                # 4. UPDATE task_rules if rating changed (exemplo simplificado)
+                # 4. UPDATE/INSERT task_rules
                 cursor.execute("SELECT id, name FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                 db_rules_map = {row.id: row.name for row in cursor.fetchall()}
-                client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
+                client_rule_ids = {r['id'] for r in task_rules if 'id' in r and isinstance(r['id'], int)}
 
-                # Remove rules that the client removed
                 for db_rule_id in list(db_rules_map.keys()):
                     if db_rule_id not in client_rule_ids:
                         cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (db_rule_id,))
 
-                # Update or insert client-provided rules
-                for r in data.get('taskRules', []):
+                for r in task_rules:
                     if isinstance(r.get('id'), int) and r['id'] in db_rules_map:
                         cursor.execute("UPDATE cri.crm.task_rules SET name = ?, frequency = ?, start_date = ?, end_date = ?, description = ? WHERE id = ?",
-                                       (r['name'], r['frequency'], r.get('startDate'), r.get('endDate'), r.get('desc'), r['id']))
+                                       (r.get('name'), r.get('frequency'), r.get('startDate'), r.get('endDate'), r.get('desc'), r['id']))
                     else:
                         cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)",
-                                       (op_id, r['name'], r['frequency'], r.get('startDate'), r.get('endDate'), r.get('desc')))
+                                       (op_id, r.get('name'), r.get('frequency'), r.get('startDate'), r.get('endDate'), r.get('desc')))
 
                 # 5. INSERT audit_log
                 details = generate_diff_details(old_op_db, data, {
@@ -426,7 +445,6 @@ def serve_react_app(path):
 if __name__ == '__main__':
     # Opcional: logar hostname do Databricks (sem expor token)
     try:
-        from db import os as _os
         host = os.getenv("DATABRICKS_SERVER_HOSTNAME")
         if host:
             logger.info("Databricks host configured: %s", host)
