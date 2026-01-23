@@ -60,103 +60,86 @@ def generate_diff_details(old_data, new_data, fields_to_compare):
 
 
 def fetch_full_operation(cursor, operation_id):
-    """ Busca uma operação completa com todos os seus dados relacionados e tarefas geradas. """
-    cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (operation_id,))
-    op_row = cursor.fetchone()
-    if not op_row:
+    """ 
+    Busca uma operação completa com todos os seus dados relacionados e tarefas geradas.
+    Esta função foi otimizada para usar uma única query com LEFT JOINs, evitando o problema N+1.
+    """
+    
+    OPTIMIZED_FETCH_QUERY = """
+    SELECT
+        op.*,
+        p.id as project_id, p.name as project_name,
+        g.id as guarantee_id, g.name as guarantee_name,
+        ev.id as event_id, ev.date as event_date, ev.type as event_type, ev.title as event_title, ev.description as event_description, ev.registered_by as event_registered_by, ev.next_steps as event_next_steps, ev.completed_task_id as event_completed_task_id,
+        tr.id as rule_id, tr.name as rule_name, tr.frequency as rule_frequency, tr.start_date as rule_start_date, tr.end_date as rule_end_date, tr.description as rule_description,
+        rh.id as history_id, rh.date as history_date, rh.rating_operation as history_rating_operation, rh.rating_group as history_rating_group, rh.watchlist as history_watchlist, rh.sentiment as history_sentiment, rh.event_id as history_event_id
+    FROM cri.crm.operations op
+    LEFT JOIN cri.crm.operation_projects op_p ON op.id = op_p.operation_id
+    LEFT JOIN cri.crm.projects p ON op_p.project_id = p.id
+    LEFT JOIN cri.crm.operation_guarantees op_g ON op.id = op_g.operation_id
+    LEFT JOIN cri.crm.guarantees g ON op_g.guarantee_id = g.id
+    LEFT JOIN cri.crm.events ev ON op.id = ev.operation_id
+    LEFT JOIN cri.crm.task_rules tr ON op.id = tr.operation_id
+    LEFT JOIN cri.crm.rating_history rh ON op.id = rh.operation_id
+    WHERE op.id = ?
+    """
+    cursor.execute(OPTIMIZED_FETCH_QUERY, (operation_id,))
+    
+    rows = cursor.fetchall()
+    if not rows:
         return None
-    
-    operation_db = format_row(op_row, cursor)
 
-    operation = {
-        'id': operation_db['id'], 'name': operation_db['name'], 'area': operation_db['area'],
-        'operationType': operation_db['operation_type'],
-        'maturityDate': operation_db['maturity_date'].isoformat() if operation_db.get('maturity_date') else None,
-        'responsibleAnalyst': operation_db['responsible_analyst'], 'reviewFrequency': operation_db['review_frequency'],
-        'callFrequency': operation_db['call_frequency'], 'dfFrequency': operation_db['df_frequency'],
-        'segmento': operation_db['segmento'], 'ratingOperation': operation_db['rating_operation'],
-        'ratingGroup': operation_db['rating_group'], 'watchlist': operation_db['watchlist'],
-        'covenants': {'ltv': operation_db['ltv'], 'dscr': operation_db['dscr']},
-        'defaultMonitoring': {
-            'news': operation_db['monitoring_news'], 'fiiReport': operation_db['monitoring_fii_report'],
-            'operationalInfo': operation_db['monitoring_operational_info'],
-            'receivablesPortfolio': operation_db['monitoring_receivables_portfolio'],
-            'monthlyConstructionReport': operation_db['monitoring_construction_report'],
-            'monthlyCommercialInfo': operation_db['monitoring_commercial_info'],
-            'speDfs': operation_db['monitoring_spe_dfs']
-        }
-    }
+    # Processar o resultado da query para montar o objeto aninhado
+    op_data = None
+    projects = set()
+    guarantees = set()
+    events = {}
+    task_rules = {}
+    rating_history = {}
 
-    cursor.execute("SELECT p.id as project_id, p.name as project_name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
-    operation['projects'] = [{'id': r.project_id, 'name': r.project_name} for r in cursor.fetchall()]
+    for row in rows:
+        if not op_data:
+            op_data = {
+                'id': row.id, 'name': row.name, 'area': row.area, 'operationType': row.operation_type,
+                'maturityDate': row.maturity_date.isoformat() if row.maturity_date else None,
+                'responsibleAnalyst': row.responsible_analyst, 'reviewFrequency': row.review_frequency,
+                'callFrequency': row.call_frequency, 'dfFrequency': row.df_frequency, 'segmento': row.segmento,
+                'ratingOperation': row.rating_operation, 'ratingGroup': row.rating_group, 'watchlist': row.watchlist,
+                'covenants': {'ltv': row.ltv, 'dscr': row.dscr},
+                'defaultMonitoring': { 'news': row.monitoring_news, 'fiiReport': row.monitoring_fii_report, 'operationalInfo': row.monitoring_operational_info, 'receivablesPortfolio': row.monitoring_receivables_portfolio, 'monthlyConstructionReport': row.monitoring_construction_report, 'monthlyCommercialInfo': row.monitoring_commercial_info, 'speDfs': row.monitoring_spe_dfs },
+            }
+        
+        if row.project_id: projects.add((row.project_id, row.project_name))
+        if row.guarantee_id: guarantees.add((row.guarantee_id, row.guarantee_name))
+        if row.event_id and row.event_id not in events: events[row.event_id] = { 'id': row.event_id, 'date': row.event_date.isoformat() if row.event_date else None, 'type': row.event_type, 'title': row.event_title, 'description': row.event_description, 'registeredBy': row.event_registered_by, 'nextSteps': row.event_next_steps, 'completedTaskId': row.event_completed_task_id }
+        if row.rule_id and row.rule_id not in task_rules: task_rules[row.rule_id] = { 'id': row.rule_id, 'name': row.rule_name, 'frequency': row.rule_frequency, 'startDate': row.rule_start_date.isoformat() if row.rule_start_date else None, 'endDate': row.rule_end_date.isoformat() if row.rule_end_date else None, 'description': row.rule_description }
+        if row.history_id and row.history_id not in rating_history: rating_history[row.history_id] = { 'id': row.history_id, 'date': row.history_date.isoformat() if row.history_date else None, 'ratingOperation': row.history_rating_operation, 'ratingGroup': row.history_rating_group, 'watchlist': row.history_watchlist, 'sentiment': row.history_sentiment, 'eventId': row.history_event_id }
 
-    cursor.execute("SELECT g.id as guarantee_id, g.name as guarantee_name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id = ?", (operation_id,))
-    operation['guarantees'] = [{'id': r.guarantee_id, 'name': r.guarantee_name} for r in cursor.fetchall()]
-    
-    cursor.execute("SELECT * FROM cri.crm.events WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
-    events = []
-    for r in cursor.fetchall():
-        entry = format_row(r, cursor)
-        events.append({
-            'id': entry.get('id'),
-            'date': entry.get('date').isoformat() if entry.get('date') else None,
-            'type': entry.get('type'),
-            'title': entry.get('title'),
-            'description': entry.get('description'),
-            'registeredBy': entry.get('registered_by'),
-            'nextSteps': entry.get('next_steps'),
-            'completedTaskId': entry.get('completed_task_id'),
-        })
-    operation['events'] = events
+    # Finalizar a montagem do objeto
+    op_data['projects'] = sorted([{'id': pid, 'name': pname} for pid, pname in projects], key=lambda x: x['name'])
+    op_data['guarantees'] = sorted([{'id': gid, 'name': gname} for gid, gname in guarantees], key=lambda x: x['name'])
+    op_data['events'] = sorted(list(events.values()), key=lambda x: x['date'], reverse=True)
+    op_data['taskRules'] = sorted(list(task_rules.values()), key=lambda x: x['id'])
+    op_data['ratingHistory'] = sorted(list(rating_history.values()), key=lambda x: x['date'], reverse=True)
 
-    cursor.execute("SELECT * FROM cri.crm.task_rules WHERE operation_id = ?", (operation_id,))
-    task_rules = []
-    for r in cursor.fetchall():
-        entry = format_row(r, cursor)
-        task_rules.append({
-            'id': entry.get('id'),
-            'name': entry.get('name'),
-            'frequency': entry.get('frequency'),
-            'startDate': entry.get('start_date').isoformat() if entry.get('start_date') else None,
-            'endDate': entry.get('end_date').isoformat() if entry.get('end_date') else None,
-            'description': entry.get('description'),
-        })
-    operation['taskRules'] = task_rules
-
-    cursor.execute("SELECT * FROM cri.crm.rating_history WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
-    rating_history = []
-    for r in cursor.fetchall():
-        entry = format_row(r, cursor)
-        rating_history.append({
-            'id': entry.get('id'),
-            'date': entry.get('date').isoformat() if entry.get('date') else None,
-            'ratingOperation': entry.get('rating_operation'),
-            'ratingGroup': entry.get('rating_group'),
-            'watchlist': entry.get('watchlist'),
-            'sentiment': entry.get('sentiment'),
-            'eventId': entry.get('event_id'),
-        })
-    operation['ratingHistory'] = rating_history
-
+    # Buscar exceções de tarefas (query rápida e separada)
     cursor.execute("SELECT task_id FROM cri.crm.task_exceptions WHERE operation_id = ?", (operation_id,))
     task_exceptions = {row.task_id for row in cursor.fetchall()}
 
-    tasks = generate_tasks_for_operation(operation, task_exceptions)
-    operation['tasks'] = tasks
-    operation['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
+    # Gerar tarefas com base nos dados montados
+    tasks = generate_tasks_for_operation(op_data, task_exceptions)
+    op_data['tasks'] = tasks
+    op_data['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
 
-    # Calculate next review dates
+    # Calcular próximas revisões
     today = date.today()
     pending_tasks = [t for t in tasks if t['status'] != 'Concluída' and datetime.fromisoformat(t['dueDate']).date() >= today]
-    
     next_gerencial_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Gerencial'])
     next_politica_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Política'])
+    op_data['nextReviewGerencial'] = next_gerencial_tasks[0] if next_gerencial_tasks else None
+    op_data['nextReviewPolitica'] = next_politica_tasks[0] if next_politica_tasks else None
 
-    operation['nextReviewGerencial'] = next_gerencial_tasks[0] if next_gerencial_tasks else None
-    operation['nextReviewPolitica'] = next_politica_tasks[0] if next_politica_tasks else None
-
-
-    return operation
+    return op_data
 
 # ================== Rotas da API ==================
 @app.route('/api/operations', methods=['GET', 'POST'])
@@ -165,9 +148,7 @@ def manage_operations_collection():
     if request.method == 'GET':
         try:
             with conn.cursor() as cursor:
-                # --- EFFICIENT BULK FETCH LOGIC ---
-                # This single query fetches all operations and their related items using LEFT JOINs.
-                # It's much more efficient than the previous N+1 query approach.
+                # --- A lógica de busca em massa já era eficiente, mantida como está ---
                 BULK_FETCH_QUERY = """
                 SELECT
                     op.*,
@@ -191,7 +172,7 @@ def manage_operations_collection():
                 operations_map = {}
                 op_order = []
 
-                # Process the flat results into nested objects
+                # Processar os resultados
                 for row in cursor.fetchall():
                     op_id = row.id
                     if op_id not in operations_map:
@@ -207,14 +188,12 @@ def manage_operations_collection():
                             'projects': set(), 'guarantees': set(), 'events': {}, 'taskRules': {}, 'ratingHistory': {}
                         }
                     
-                    # Using sets/dicts with IDs as keys to prevent duplicates from JOINs
                     if row.project_id: operations_map[op_id]['projects'].add((row.project_id, row.project_name))
                     if row.guarantee_id: operations_map[op_id]['guarantees'].add((row.guarantee_id, row.guarantee_name))
                     if row.event_id: operations_map[op_id]['events'][row.event_id] = { 'id': row.event_id, 'date': row.event_date.isoformat() if row.event_date else None, 'type': row.event_type, 'title': row.event_title, 'description': row.event_description, 'registeredBy': row.event_registered_by, 'nextSteps': row.event_next_steps, 'completedTaskId': row.event_completed_task_id }
                     if row.rule_id: operations_map[op_id]['taskRules'][row.rule_id] = { 'id': row.rule_id, 'name': row.rule_name, 'frequency': row.rule_frequency, 'startDate': row.rule_start_date.isoformat() if row.rule_start_date else None, 'endDate': row.rule_end_date.isoformat() if row.rule_end_date else None, 'description': row.rule_description }
                     if row.history_id: operations_map[op_id]['ratingHistory'][row.history_id] = { 'id': row.history_id, 'date': row.history_date.isoformat() if row.history_date else None, 'ratingOperation': row.history_rating_operation, 'ratingGroup': row.history_rating_group, 'watchlist': row.history_watchlist, 'sentiment': row.history_sentiment, 'eventId': row.history_event_id }
 
-                # Convert sets and dicts back to lists for JSON serialization
                 final_operations = []
                 cursor.execute("SELECT operation_id, task_id FROM cri.crm.task_exceptions")
                 exceptions_by_op = defaultdict(set)
@@ -229,7 +208,6 @@ def manage_operations_collection():
                     op['taskRules'] = sorted(list(op['taskRules'].values()), key=lambda x: x['id'])
                     op['ratingHistory'] = sorted(list(op['ratingHistory'].values()), key=lambda x: x['date'], reverse=True)
 
-                    # Now, generate tasks for the fully reconstructed operation
                     task_exceptions = exceptions_by_op.get(op_id, set())
                     tasks = generate_tasks_for_operation(op, task_exceptions)
                     op['tasks'] = tasks
@@ -256,19 +234,13 @@ def manage_operations_collection():
         try:
             data = request.json
             with conn.cursor() as cursor:
-                # --- Dynamic Frequency Logic on Creation ---
                 politica_freq = RATING_TO_POLITICA_FREQUENCY.get(data['ratingGroup'], 'Anual')
                 gerencial_freq = data['reviewFrequency']
 
-                # Enforce that gerencial is at least as frequent as politica
                 if FREQUENCY_VALUE_MAP.get(gerencial_freq, 999) > FREQUENCY_VALUE_MAP.get(politica_freq, 0):
                     gerencial_freq = politica_freq
-                
-                # Update the main operation record with the potentially adjusted gerencial frequency
                 data['reviewFrequency'] = gerencial_freq
-                # --- End of Logic ---
 
-                # Insert main operation and get its ID
                 dm = data.get('defaultMonitoring', {})
                 cursor.execute(
                     "INSERT INTO cri.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -276,10 +248,7 @@ def manage_operations_collection():
                 )
                 cursor.execute("SELECT id FROM cri.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
                 new_op_id = cursor.fetchone().id
-
-                # ... (code for projects and guarantees is the same)
                 
-                # Create default task rules and initial rating history
                 today, end_date_iso = datetime.now().isoformat(), data['maturityDate']
                 rules_to_add = [
                     {'name': 'Revisão Gerencial', 'frequency': gerencial_freq, 'desc': 'Revisão periódica gerencial.'},
@@ -297,6 +266,7 @@ def manage_operations_collection():
             conn.commit()
             
             with conn.cursor() as cursor:
+                # Usa a função otimizada para retornar a nova operação
                 new_operation_full = fetch_full_operation(cursor, new_op_id)
             return jsonify(new_operation_full), 201
         except Exception as e:
@@ -313,75 +283,51 @@ def manage_operation(op_id):
         try:
             data = request.json
             with conn.cursor() as cursor:
-                # Fetch original data for diff logging
                 cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
                 old_op_db = format_row(cursor.fetchone(), cursor) if cursor.rowcount > 0 else {}
                 old_rating_group = old_op_db.get('rating_group')
                 new_rating_group = data['ratingGroup']
                 
-                # --- Dynamic Frequency Logic on Update ---
                 if old_rating_group != new_rating_group:
+                    cursor.execute("SELECT name, frequency, start_date FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
+                    all_rules = {row.name: {'frequency': row.frequency, 'start_date': row.start_date} for row in cursor.fetchall()}
+                    
+                    cursor.execute("SELECT type, MAX(date) as max_date FROM cri.crm.events WHERE operation_id = ? AND type = 'Revisão Periódica' GROUP BY type", (op_id,))
+                    last_review_date = cursor.fetchone()
+                    last_review_date = last_review_date.max_date if last_review_date else None
+
                     new_politica_freq = RATING_TO_POLITICA_FREQUENCY.get(new_rating_group, 'Anual')
+                    politica_rule = all_rules.get('Revisão Política')
                     
-                    # Find the date of the last policy review to reset the schedule
-                    cursor.execute("SELECT MAX(date) FROM cri.crm.events WHERE operation_id = ? AND (title = 'Conclusão: Revisão Política' OR type = 'Revisão Periódica')", (op_id,))
-                    last_review_date_row = cursor.fetchone()
-                    
-                    if last_review_date_row and last_review_date_row[0]:
-                        new_start_date = last_review_date_row[0]
-                    else:
-                        cursor.execute("SELECT start_date FROM cri.crm.task_rules WHERE operation_id = ? AND name = 'Revisão Política'", (op_id,))
-                        start_date_row = cursor.fetchone()
-                        if start_date_row:
-                            new_start_date = start_date_row[0]
-                        else:
-                            new_start_date = datetime.now() # Safe fallback
+                    if politica_rule:
+                        new_politica_start_date = last_review_date or politica_rule['start_date'] or datetime.now()
+                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, new_politica_start_date, op_id))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq} devido à mudança de rating.")
 
-                    
-                    cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, new_start_date, op_id))
-                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq} devido à mudança de rating.")
-
-                    # Now, check and adjust the Gerencial frequency if necessary
-                    cursor.execute("SELECT frequency, start_date FROM cri.crm.task_rules WHERE operation_id = ? AND name = 'Revisão Gerencial'", (op_id,))
-                    gerencial_rule = cursor.fetchone()
-                    if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule[0], 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
-                        cursor.execute("SELECT MAX(date) FROM cri.crm.events WHERE operation_id = ? AND (title = 'Conclusão: Revisão Gerencial' OR type = 'Revisão Periódica')", (op_id,))
-                        last_gerencial_date_row = cursor.fetchone()
-                        new_gerencial_start = last_gerencial_date_row[0] if last_gerencial_date_row and last_gerencial_date_row[0] else gerencial_rule[1]
-
-                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (new_politica_freq, new_gerencial_start, op_id))
-                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq} para alinhar com a política.")
-                # --- End of Logic ---
-
-                # Update main operation table
+                    gerencial_rule = all_rules.get('Revisão Gerencial')
+                    if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule['frequency'], 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
+                        new_gerencial_start_date = last_review_date or gerencial_rule['start_date'] or datetime.now()
+                        adjusted_gerencial_freq = new_politica_freq
+                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (adjusted_gerencial_freq, new_gerencial_start_date, op_id))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {adjusted_gerencial_freq} para alinhar com a política.")
+                
                 cov = data.get('covenants', {})
                 cursor.execute(
-                    """
-                    UPDATE cri.crm.operations 
-                    SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? 
-                    WHERE id = ?
-                    """, 
+                    "UPDATE cri.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?", 
                     (data['name'], data['area'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id)
                 )
                 
-                # Sync Events
-                db_event_ids = {row.id for row in cursor.execute("SELECT id FROM cri.crm.events WHERE operation_id = ?", (op_id,)).fetchall()}
-                client_event_ids = {e['id'] for e in data.get('events', []) if isinstance(e.get('id'), int)}
                 for event in data.get('events', []):
-                    if not isinstance(event.get('id'), int): # New event
+                    if not isinstance(event.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                                        (op_id, event['date'], event['type'], event['title'], event['description'], event['registeredBy'], event['nextSteps'], event.get('completedTaskId')))
                         log_action(cursor, event['registeredBy'], 'CREATE', 'Event', 'new', f"Evento '{event['title']}' adicionado à operação '{data['name']}'.")
 
-                # Sync Rating History
-                db_rh_ids = {row.id for row in cursor.execute("SELECT id FROM cri.crm.rating_history WHERE operation_id = ?", (op_id,)).fetchall()}
-                client_rh_ids = {rh['id'] for rh in data.get('ratingHistory', []) if isinstance(rh.get('id'), int)}
                 for rh in data.get('ratingHistory', []):
-                    if not isinstance(rh.get('id'), int): # New history entry
+                    if not isinstance(rh.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                                        (op_id, rh['date'], rh['ratingOperation'], rh['ratingGroup'], rh['watchlist'], rh['sentiment'], rh['eventId']))
 
-                # Sync Task Rules
                 cursor.execute("SELECT id, name FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                 db_rules_map = {row.id: row.name for row in cursor.fetchall()}
                 client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
@@ -393,7 +339,6 @@ def manage_operation(op_id):
                 for rule in data.get('taskRules', []):
                     rule_id = rule.get('id')
                     if rule_id and rule_id in db_rules_map:
-                        # Updates to frequency/start_date for review rules are handled by the dynamic logic above
                         if rule['name'] not in ['Revisão Política', 'Revisão Gerencial']:
                             cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
                                            (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule_id))
@@ -409,6 +354,7 @@ def manage_operation(op_id):
             conn.commit()
             
             with conn.cursor() as cursor:
+                # Usa a função otimizada para retornar o estado atualizado
                 updated_operation_full = fetch_full_operation(cursor, op_id)
             return jsonify(updated_operation_full)
         except Exception as e:
@@ -423,7 +369,6 @@ def manage_operation(op_id):
             with conn.cursor() as cursor:
                 cursor.execute("SELECT name, responsible_analyst FROM cri.crm.operations WHERE id = ?", (op_id,))
                 op_info = cursor.fetchone()
-                # Cascade delete and log
                 cursor.execute("DELETE FROM cri.crm.operation_projects WHERE operation_id = ?", (op_id,))
                 cursor.execute("DELETE FROM cri.crm.operation_guarantees WHERE operation_id = ?", (op_id,))
                 cursor.execute("DELETE FROM cri.crm.rating_history WHERE operation_id = ?", (op_id,))
@@ -467,9 +412,7 @@ def edit_task():
         data = request.json
         updates = data['updates']
         with conn.cursor() as cursor:
-            # 1. Add exception for the old task
             cursor.execute("INSERT INTO cri.crm.task_exceptions (task_id, operation_id, deleted_at, deleted_by) VALUES (?, ?, ?, ?)", (data['originalTaskId'], data['operationId'], datetime.now(), data.get('responsibleAnalyst')))
-            # 2. Create a new ad-hoc rule for the edited task
             due_date = updates['dueDate']
             cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, 'Pontual', ?, ?, ?)", (data['operationId'], updates['name'], due_date, due_date, f"Tarefa editada a partir de {data['originalTaskId']}"))
             log_action(cursor, data.get('responsibleAnalyst'), 'UPDATE', 'Task', data['originalTaskId'], f"Tarefa editada para ter nome '{updates['name']}' e vencimento em {due_date}.")
