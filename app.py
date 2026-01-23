@@ -5,13 +5,12 @@ from flask_cors import CORS
 from db import get_db_connection
 from task_engine import generate_tasks_for_operation
 from datetime import datetime, date, timedelta
+from collections import defaultdict
 
 # Configura o Flask para servir os arquivos estáticos da pasta raiz do projeto
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'), static_url_path='')
 
 # Configuração de CORS para permitir requisições de qualquer origem.
-# Isso é essencial para que o frontend (rodando em um domínio diferente, como o do AI Studio)
-# possa se comunicar com este backend sem ser bloqueado pela política de segurança do navegador.
 CORS(app, supports_credentials=True)
 
 
@@ -46,11 +45,11 @@ def fetch_full_operation(cursor, operation_id):
         }
     }
 
-    cursor.execute("SELECT p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
-    operation['projects'] = [format_row(row, cursor) for row in cursor.fetchall()]
+    cursor.execute("SELECT op.operation_id, p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
+    operation['projects'] = [{'id': r.id, 'name': r.name} for r in cursor.fetchall()]
 
-    cursor.execute("SELECT g.id, g.name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id = ?", (operation_id,))
-    operation['guarantees'] = [format_row(row, cursor) for row in cursor.fetchall()]
+    cursor.execute("SELECT og.operation_id, g.id, g.name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id = ?", (operation_id,))
+    operation['guarantees'] = [{'id': r.id, 'name': r.name} for r in cursor.fetchall()]
     
     cursor.execute("SELECT * FROM cri.crm.events WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
     events = []
@@ -109,9 +108,91 @@ def manage_operations_collection():
     if request.method == 'GET':
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT id FROM cri.crm.operations ORDER BY name")
-                operation_ids = [row.id for row in cursor.fetchall()]
-                all_operations = [fetch_full_operation(cursor, op_id) for op_id in operation_ids]
+                # 1. Fetch all base operations
+                cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
+                operations_db = [format_row(row, cursor) for row in cursor.fetchall()]
+                if not operations_db:
+                    return jsonify([])
+
+                operation_ids = [op['id'] for op in operations_db]
+                
+                # Create a placeholder for the IN clause
+                placeholders = ', '.join(['?'] * len(operation_ids))
+
+                # 2. Fetch all related items in bulk
+                projects_by_op_id = defaultdict(list)
+                cursor.execute(f"SELECT op.operation_id, p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id IN ({placeholders})", operation_ids)
+                for row in cursor.fetchall():
+                    projects_by_op_id[row.operation_id].append({'id': row.id, 'name': row.name})
+
+                guarantees_by_op_id = defaultdict(list)
+                cursor.execute(f"SELECT og.operation_id, g.id, g.name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id IN ({placeholders})", operation_ids)
+                for row in cursor.fetchall():
+                    guarantees_by_op_id[row.operation_id].append({'id': row.id, 'name': row.name})
+
+                events_by_op_id = defaultdict(list)
+                cursor.execute(f"SELECT * FROM cri.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", operation_ids)
+                for row in cursor.fetchall():
+                    entry = format_row(row, cursor)
+                    events_by_op_id[entry['operation_id']].append({
+                        'id': entry.get('id'), 'date': entry.get('date').isoformat() if entry.get('date') else None,
+                        'type': entry.get('type'), 'title': entry.get('title'), 'description': entry.get('description'),
+                        'registeredBy': entry.get('registered_by'), 'nextSteps': entry.get('next_steps'),
+                        'completedTaskId': entry.get('completed_task_id'),
+                    })
+                
+                rules_by_op_id = defaultdict(list)
+                cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", operation_ids)
+                for row in cursor.fetchall():
+                    entry = format_row(row, cursor)
+                    rules_by_op_id[entry['operation_id']].append({
+                        'id': entry.get('id'), 'name': entry.get('name'), 'frequency': entry.get('frequency'),
+                        'startDate': entry.get('start_date').isoformat() if entry.get('start_date') else None,
+                        'endDate': entry.get('end_date').isoformat() if entry.get('end_date') else None,
+                        'description': entry.get('description'),
+                    })
+
+                history_by_op_id = defaultdict(list)
+                cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", operation_ids)
+                for row in cursor.fetchall():
+                    entry = format_row(row, cursor)
+                    history_by_op_id[entry['operation_id']].append({
+                        'id': entry.get('id'), 'date': entry.get('date').isoformat() if entry.get('date') else None,
+                        'ratingOperation': entry.get('rating_operation'), 'ratingGroup': entry.get('rating_group'),
+                        'sentiment': entry.get('sentiment'), 'eventId': entry.get('event_id'),
+                    })
+
+                # 3. Assemble the final structure
+                all_operations = []
+                for op_db in operations_db:
+                    op_id = op_db['id']
+                    operation = {
+                        'id': op_id, 'name': op_db['name'], 'operationType': op_db['operation_type'],
+                        'maturityDate': op_db['maturity_date'].isoformat() if op_db.get('maturity_date') else None,
+                        'responsibleAnalyst': op_db['responsible_analyst'], 'reviewFrequency': op_db['review_frequency'],
+                        'callFrequency': op_db['call_frequency'], 'dfFrequency': op_db['df_frequency'],
+                        'segmento': op_db['segmento'], 'ratingOperation': op_db['rating_operation'],
+                        'ratingGroup': op_db['rating_group'], 'watchlist': op_db['watchlist'],
+                        'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
+                        'defaultMonitoring': {
+                            'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'],
+                            'operationalInfo': op_db['monitoring_operational_info'],
+                            'receivablesPortfolio': op_db['monitoring_receivables_portfolio'],
+                            'monthlyConstructionReport': op_db['monitoring_construction_report'],
+                            'monthlyCommercialInfo': op_db['monitoring_commercial_info'],
+                            'speDfs': op_db['monitoring_spe_dfs']
+                        },
+                        'projects': projects_by_op_id[op_id],
+                        'guarantees': guarantees_by_op_id[op_id],
+                        'events': events_by_op_id[op_id],
+                        'taskRules': rules_by_op_id[op_id],
+                        'ratingHistory': history_by_op_id[op_id],
+                    }
+                    tasks = generate_tasks_for_operation(operation)
+                    operation['tasks'] = tasks
+                    operation['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
+                    all_operations.append(operation)
+
             return jsonify(all_operations)
         finally:
             conn.close()
