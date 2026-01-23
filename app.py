@@ -84,6 +84,7 @@ def manage_operations_collection():
     elif request.method == 'POST':
         try:
             data = request.json
+            new_op_id = None
             with conn.cursor() as cursor:
                 dm = data.get('defaultMonitoring', {})
                 cursor.execute(
@@ -100,18 +101,28 @@ def manage_operations_collection():
                     )
                 )
                 cursor.execute("SELECT id FROM cri.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
-                new_op_id = cursor.fetchone().id
+                new_op_row = cursor.fetchone()
+                if not new_op_row: raise Exception("Failed to get new operation ID.")
+                new_op_id = new_op_row.id
 
                 for proj in data.get('projects', []):
                     cursor.execute("SELECT id FROM cri.crm.projects WHERE name = ?", (proj['name'],))
                     existing_proj = cursor.fetchone()
-                    proj_id = existing_proj.id if existing_proj else cursor.execute("INSERT INTO cri.crm.projects (name) VALUES (?)", (proj['name'],)).lastrowid
+                    proj_id = existing_proj.id if existing_proj else None
+                    if not proj_id:
+                        cursor.execute("INSERT INTO cri.crm.projects (name) VALUES (?)", (proj['name'],))
+                        cursor.execute("SELECT id FROM cri.crm.projects WHERE name = ? ORDER BY id DESC LIMIT 1", (proj['name'],))
+                        proj_id = cursor.fetchone().id
                     cursor.execute("INSERT INTO cri.crm.operation_projects (operation_id, project_id) VALUES (?, ?)", (new_op_id, proj_id))
 
                 for guar in data.get('guarantees', []):
                     cursor.execute("SELECT id FROM cri.crm.guarantees WHERE name = ?", (guar['name'],))
                     existing_guar = cursor.fetchone()
-                    guar_id = existing_guar.id if existing_guar else cursor.execute("INSERT INTO cri.crm.guarantees (name) VALUES (?)", (guar['name'],)).lastrowid
+                    guar_id = existing_guar.id if existing_guar else None
+                    if not guar_id:
+                        cursor.execute("INSERT INTO cri.crm.guarantees (name) VALUES (?)", (guar['name'],))
+                        cursor.execute("SELECT id FROM cri.crm.guarantees WHERE name = ? ORDER BY id DESC LIMIT 1", (guar['name'],))
+                        guar_id = cursor.fetchone().id
                     cursor.execute("INSERT INTO cri.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (new_op_id, guar_id))
 
                 today = datetime.now()
@@ -124,7 +135,6 @@ def manage_operations_collection():
                 ]
                 if dm.get('news'):
                     rules_to_add.append({'name': 'Monitorar Notícias', 'frequency': 'Semanal', 'desc': 'Acompanhar notícias relacionadas à operação e ao mercado.'})
-                # Adicione outras regras baseadas em dm aqui...
 
                 for rule in rules_to_add:
                     cursor.execute(
@@ -136,11 +146,17 @@ def manage_operations_collection():
                     "INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, sentiment) VALUES (?, ?, ?, ?, ?)",
                     (new_op_id, start_date_iso, data['ratingOperation'], data['ratingGroup'], 'Neutro')
                 )
-                
-                new_operation_full = fetch_full_operation(cursor, new_op_id)
             
             conn.commit()
+            
+            with conn.cursor() as cursor:
+                new_operation_full = fetch_full_operation(cursor, new_op_id)
+            
             return jsonify(new_operation_full), 201
+        except Exception as e:
+            conn.rollback()
+            app.logger.error(f"Error in POST /api/operations: {e}")
+            return jsonify({"error": str(e)}), 500
         finally:
             conn.close()
 
@@ -170,7 +186,10 @@ def manage_operation(op_id):
                             "INSERT INTO cri.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                             (op_id, event['date'], event['type'], event['title'], event['description'], event['registeredBy'], event['nextSteps'], event.get('completedTaskId'))
                         )
-                        newly_inserted_event_ids_map[event.get('id')] = cursor.lastrowid
+                        cursor.execute("SELECT id FROM cri.crm.events WHERE operation_id = ? ORDER BY id DESC LIMIT 1", (op_id,))
+                        new_event_row = cursor.fetchone()
+                        if new_event_row:
+                            newly_inserted_event_ids_map[event.get('id')] = new_event_row.id
 
                 db_rh_ids = {row.id for row in cursor.execute("SELECT id FROM cri.crm.rating_history WHERE operation_id = ?", (op_id,)).fetchall()}
                 for rh_entry in data.get('ratingHistory', []):
@@ -189,9 +208,17 @@ def manage_operation(op_id):
                             "INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)",
                             (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'])
                         )
-                updated_operation_full = fetch_full_operation(cursor, op_id)
+
             conn.commit()
+
+            with conn.cursor() as cursor:
+                updated_operation_full = fetch_full_operation(cursor, op_id)
+            
             return jsonify(updated_operation_full)
+        except Exception as e:
+            conn.rollback()
+            app.logger.error(f"Error in PUT /api/operations/{op_id}: {e}")
+            return jsonify({"error": str(e)}), 500
         finally:
             conn.close()
 
