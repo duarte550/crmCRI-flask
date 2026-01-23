@@ -1,55 +1,48 @@
 
 from datetime import date, timedelta, datetime
+import calendar
 
 def get_next_date(current_date, frequency):
     """
-    Calculates the next due date based on a given frequency.
-    Note: This is a simplified implementation for monthly/yearly steps.
+    Calculates the next due date based on a given frequency, correctly handling month-end variations.
     """
-    next_d = current_date
     if frequency == 'Diário':
-        next_d += timedelta(days=1)
+        return current_date + timedelta(days=1)
     elif frequency == 'Semanal':
-        next_d += timedelta(days=7)
+        return current_date + timedelta(days=7)
     elif frequency == 'Quinzenal':
-        next_d += timedelta(days=15)
-    elif frequency == 'Mensal':
-        # A more robust library like dateutil.relativedelta is better for edge cases
-        try:
-            next_d = next_d.replace(month=next_d.month + 1)
-        except ValueError: # Handles months with different number of days
-            if next_d.month == 12:
-                next_d = next_d.replace(year=next_d.year + 1, month=1)
-            else:
-                 # Go to the first day of the month after next, then subtract one day
-                next_d = next_d.replace(month=next_d.month + 2, day=1) - timedelta(days=1)
+        return current_date + timedelta(days=15)
 
+    # For month-based frequencies, handle month-end variations carefully.
+    month_offset = 0
+    year_offset = 0
+
+    if frequency == 'Mensal':
+        month_offset = 1
     elif frequency == 'Trimestral':
-        try:
-            next_d = next_d.replace(month=next_d.month + 3)
-        except ValueError:
-             # Logic to handle jumping over year-end and different month lengths
-            new_month = next_d.month + 3
-            new_year = next_d.year
-            if new_month > 12:
-                new_year += 1
-                new_month -= 12
-            next_d = next_d.replace(year=new_year, month=new_month)
-
+        month_offset = 3
     elif frequency == 'Semestral':
-        try:
-            next_d = next_d.replace(month=next_d.month + 6)
-        except ValueError:
-            new_month = next_d.month + 6
-            new_year = next_d.year
-            if new_month > 12:
-                new_year += 1
-                new_month -= 12
-            next_d = next_d.replace(year=new_year, month=new_month)
-
+        month_offset = 6
     elif frequency == 'Anual':
-        next_d = next_d.replace(year=next_d.year + 1)
-    return next_d
+        year_offset = 1
+
+    # This logic applies to all month/year-based frequencies
+    if month_offset > 0 or year_offset > 0:
+        # Calculate target year and month
+        new_month_raw = current_date.month + month_offset
+        new_year = current_date.year + year_offset + (new_month_raw - 1) // 12
+        new_month = (new_month_raw - 1) % 12 + 1
+
+        # Find the last day of the target month
+        last_day_of_target_month = calendar.monthrange(new_year, new_month)[1]
+
+        # Use the original day if it's valid, otherwise use the last day of the month
+        new_day = min(current_date.day, last_day_of_target_month)
+
+        return date(new_year, new_month, new_day)
+    
+    # Fallback for any other frequency type (shouldn't happen with current data)
+    return current_date
 
 def generate_tasks_for_rule(operation, rule, task_exceptions):
     """ Generates all task instances for a single rule. """
