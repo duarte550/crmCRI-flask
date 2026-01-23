@@ -87,11 +87,11 @@ def fetch_full_operation(cursor, operation_id):
         }
     }
 
-    cursor.execute("SELECT op.operation_id, p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
-    operation['projects'] = [{'id': r.id, 'name': r.name} for r in cursor.fetchall()]
+    cursor.execute("SELECT p.id as project_id, p.name as project_name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
+    operation['projects'] = [{'id': r.project_id, 'name': r.project_name} for r in cursor.fetchall()]
 
-    cursor.execute("SELECT og.operation_id, g.id, g.name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id = ?", (operation_id,))
-    operation['guarantees'] = [{'id': r.id, 'name': r.name} for r in cursor.fetchall()]
+    cursor.execute("SELECT g.id as guarantee_id, g.name as guarantee_name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id = ?", (operation_id,))
+    operation['guarantees'] = [{'id': r.guarantee_id, 'name': r.guarantee_name} for r in cursor.fetchall()]
     
     cursor.execute("SELECT * FROM cri.crm.events WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
     events = []
