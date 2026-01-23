@@ -53,13 +53,48 @@ def fetch_full_operation(cursor, operation_id):
     operation['guarantees'] = [format_row(row, cursor) for row in cursor.fetchall()]
     
     cursor.execute("SELECT * FROM cri.crm.events WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
-    operation['events'] = [{**format_row(r, cursor), 'date': r.date.isoformat() if r.date else None} for r in cursor.fetchall()]
-    
+    events = []
+    for r in cursor.fetchall():
+        entry = format_row(r, cursor)
+        events.append({
+            'id': entry.get('id'),
+            'date': entry.get('date').isoformat() if entry.get('date') else None,
+            'type': entry.get('type'),
+            'title': entry.get('title'),
+            'description': entry.get('description'),
+            'registeredBy': entry.get('registered_by'),
+            'nextSteps': entry.get('next_steps'),
+            'completedTaskId': entry.get('completed_task_id'),
+        })
+    operation['events'] = events
+
     cursor.execute("SELECT * FROM cri.crm.task_rules WHERE operation_id = ?", (operation_id,))
-    operation['taskRules'] = [{**format_row(r, cursor), 'startDate': r.start_date.isoformat() if r.start_date else None, 'endDate': r.end_date.isoformat() if r.end_date else None} for r in cursor.fetchall()]
-    
+    task_rules = []
+    for r in cursor.fetchall():
+        entry = format_row(r, cursor)
+        task_rules.append({
+            'id': entry.get('id'),
+            'name': entry.get('name'),
+            'frequency': entry.get('frequency'),
+            'startDate': entry.get('start_date').isoformat() if entry.get('start_date') else None,
+            'endDate': entry.get('end_date').isoformat() if entry.get('end_date') else None,
+            'description': entry.get('description'),
+        })
+    operation['taskRules'] = task_rules
+
     cursor.execute("SELECT * FROM cri.crm.rating_history WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
-    operation['ratingHistory'] = [{**format_row(r, cursor), 'date': r.date.isoformat() if r.date else None} for r in cursor.fetchall()]
+    rating_history = []
+    for r in cursor.fetchall():
+        entry = format_row(r, cursor)
+        rating_history.append({
+            'id': entry.get('id'),
+            'date': entry.get('date').isoformat() if entry.get('date') else None,
+            'ratingOperation': entry.get('rating_operation'),
+            'ratingGroup': entry.get('rating_group'),
+            'sentiment': entry.get('sentiment'),
+            'eventId': entry.get('event_id'),
+        })
+    operation['ratingHistory'] = rating_history
 
     tasks = generate_tasks_for_operation(operation)
     operation['tasks'] = tasks
