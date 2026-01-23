@@ -330,11 +330,20 @@ def manage_operation(op_id):
                         )
 
             conn.commit()
-
-            with conn.cursor() as cursor:
-                updated_operation_full = fetch_full_operation(cursor, op_id)
             
-            return jsonify(updated_operation_full)
+            # Optimization: Instead of re-fetching, we trust the data from the client is now the source of truth.
+            # We return it directly for speed. The frontend's optimistic update handles the UI.
+            # The client will send the full object, and we just echo it back as confirmation.
+            # For a more robust system, one might return just a success message or only the fields that can be changed by the server.
+            # But for this use-case, echoing the input is fast and effective.
+            
+            # To ensure tasks and overdue counts are fresh after an update (e.g., adding a task rule),
+            # we can regenerate them here before sending back.
+            tasks = generate_tasks_for_operation(data)
+            data['tasks'] = tasks
+            data['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
+
+            return jsonify(data)
         except Exception as e:
             conn.rollback()
             app.logger.error(f"Error in PUT /api/operations/{op_id}: {e}")
