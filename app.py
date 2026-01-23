@@ -186,12 +186,18 @@ def manage_operations_collection():
                         'defaultMonitoring': {'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'], 'operationalInfo': op_db['monitoring_operational_info'], 'receivablesPortfolio': op_db['monitoring_receivables_portfolio'], 'monthlyConstructionReport': op_db['monitoring_construction_report'], 'monthlyCommercialInfo': op_db['monitoring_commercial_info'], 'speDfs': op_db['monitoring_spe_dfs']},
                         'projects': projects_by_op_id[op_id], 'guarantees': guarantees_by_op_id[op_id], 'events': events_by_op_id[op_id], 'taskRules': rules_by_op_id[op_id], 'ratingHistory': history_by_op_id[op_id]
                     }
+                    app.logger.debug(f"Generating tasks for operation ID: {op_id}")
                     tasks = generate_tasks_for_operation(operation, exceptions_by_op_id[op_id])
                     operation['tasks'] = tasks
                     operation['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
                     all_operations.append(operation)
             return jsonify(all_operations)
-        finally: conn.close()
+        except Exception as e:
+            app.logger.error(f"Exception on /api/operations [GET]: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally: 
+            if conn:
+                conn.close()
     
     elif request.method == 'POST':
         try:
@@ -225,9 +231,11 @@ def manage_operations_collection():
             return jsonify(new_operation_full), 201
         except Exception as e:
             conn.rollback()
-            app.logger.error(f"Error in POST /api/operations: {e}")
+            app.logger.error(f"Error in POST /api/operations: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
-        finally: conn.close()
+        finally: 
+            if conn:
+                conn.close()
 
 @app.route('/api/operations/<int:op_id>', methods=['PUT', 'DELETE'])
 def manage_operation(op_id):
@@ -236,47 +244,80 @@ def manage_operation(op_id):
         try:
             data = request.json
             with conn.cursor() as cursor:
-                old_data = fetch_full_operation(cursor, op_id)
+                # Fetch original data for diff logging
+                cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
+                old_op_db = format_row(cursor.fetchone(), cursor) if cursor.rowcount > 0 else {}
+                old_data_for_diff = {
+                    'name': old_op_db.get('name'),
+                    'ratingOperation': old_op_db.get('rating_operation'),
+                    'ratingGroup': old_op_db.get('rating_group'),
+                    'watchlist': old_op_db.get('watchlist'),
+                    'covenants': {'ltv': old_op_db.get('ltv'), 'dscr': old_op_db.get('dscr')}
+                }
                 
                 # Update main operation table
                 cov = data.get('covenants', {})
-                cursor.execute("UPDATE cri.crm.operations SET name = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?", (data['name'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id))
+                cursor.execute(
+                    """
+                    UPDATE cri.crm.operations 
+                    SET name = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? 
+                    WHERE id = ?
+                    """, 
+                    (data['name'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], cov.get('ltv'), cov.get('dscr'), op_id)
+                )
                 
-                # ... (code for syncing events and rating history is similar) ...
+                # Sync Events
+                db_event_ids = {row.id for row in cursor.execute("SELECT id FROM cri.crm.events WHERE operation_id = ?", (op_id,)).fetchall()}
+                client_event_ids = {e['id'] for e in data.get('events', []) if isinstance(e.get('id'), int)}
+                for event in data.get('events', []):
+                    if not isinstance(event.get('id'), int): # New event
+                        cursor.execute("INSERT INTO cri.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                       (op_id, event['date'], event['type'], event['title'], event['description'], event['registeredBy'], event['nextSteps'], event.get('completedTaskId')))
+                        log_action(cursor, event['registeredBy'], 'CREATE', 'Event', 'new', f"Evento '{event['title']}' adicionado à operação '{data['name']}'.")
 
-                # Sync Task Rules (Create, Update, Delete)
+                # Sync Rating History
+                db_rh_ids = {row.id for row in cursor.execute("SELECT id FROM cri.crm.rating_history WHERE operation_id = ?", (op_id,)).fetchall()}
+                client_rh_ids = {rh['id'] for rh in data.get('ratingHistory', []) if isinstance(rh.get('id'), int)}
+                for rh in data.get('ratingHistory', []):
+                    if not isinstance(rh.get('id'), int): # New history entry
+                        cursor.execute("INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?)",
+                                       (op_id, rh['date'], rh['ratingOperation'], rh['ratingGroup'], rh['sentiment'], rh['eventId']))
+
+                # Sync Task Rules
+                cursor.execute("SELECT id, name FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
+                db_rules_map = {row.id: row.name for row in cursor.fetchall()}
                 client_rule_ids = {r['id'] for r in data.get('taskRules', []) if isinstance(r.get('id'), int)}
-                db_rules_map = {r['id']: r for r in old_data.get('taskRules', [])}
-                
-                # Delete rules not present in client data
-                for rule_id in db_rules_map.keys() - client_rule_ids:
-                    cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (rule_id,))
-                    log_action(cursor, data.get('responsibleAnalyst'), 'DELETE', 'TaskRule', rule_id, f"Regra '{db_rules_map[rule_id]['name']}' deletada da operação '{data['name']}'.")
 
-                # Insert or Update rules
+                for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
+                    cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
+                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'TaskRule', rule_id_to_delete, f"Regra '{db_rules_map[rule_id_to_delete]}' deletada da operação '{data['name']}'.")
+
                 for rule in data.get('taskRules', []):
-                    if isinstance(rule.get('id'), int) and rule['id'] in db_rules_map: # Update existing
-                        cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule['id']))
-                        # Add diff logging for rules if needed
-                    elif not isinstance(rule.get('id'), int): # Insert new
-                        cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description']))
-                        log_action(cursor, data.get('responsibleAnalyst'), 'CREATE', 'TaskRule', rule.get('id', 'new'), f"Regra '{rule['name']}' adicionada à operação '{data['name']}'.")
+                    if isinstance(rule.get('id'), int) and rule['id'] in db_rules_map:
+                        cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
+                                       (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule['id']))
+                    elif not isinstance(rule.get('id'), int):
+                        cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", 
+                                       (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description']))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule['name']}' adicionada à operação '{data['name']}'.")
 
                 # Log general operation changes
-                details = generate_diff_details(old_data, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
-                if details: log_action(cursor, data.get('responsibleAnalyst'), 'UPDATE', 'Operation', op_id, details)
+                details = generate_diff_details(old_data_for_diff, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist', 'covenants.ltv': 'LTV', 'covenants.dscr': 'DSCR'})
+                if details: 
+                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
             
             conn.commit()
             
-            # Re-fetch the full operation to get fresh tasks and counts
             with conn.cursor() as cursor:
                 updated_operation_full = fetch_full_operation(cursor, op_id)
             return jsonify(updated_operation_full)
         except Exception as e:
             conn.rollback()
-            app.logger.error(f"Error in PUT /api/operations/{op_id}: {e}")
+            app.logger.error(f"Error in PUT /api/operations/{op_id}: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
-        finally: conn.close()
+        finally: 
+            if conn:
+                conn.close()
 
     elif request.method == 'DELETE':
         try:
@@ -291,10 +332,16 @@ def manage_operation(op_id):
                 cursor.execute("DELETE FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                 cursor.execute("DELETE FROM cri.crm.task_exceptions WHERE operation_id = ?", (op_id,))
                 cursor.execute("DELETE FROM cri.crm.operations WHERE id = ?", (op_id,))
-                log_action(cursor, op_info.responsible_analyst, 'DELETE', 'Operation', op_id, f"Operação '{op_info.name}' e todos os seus dados foram deletados.")
+                log_action(cursor, op_info.responsible_analyst if op_info else 'System', 'DELETE', 'Operation', op_id, f"Operação '{op_info.name if op_info else 'ID: ' + str(op_id)}' e todos os seus dados foram deletados.")
             conn.commit()
             return '', 204
-        finally: conn.close()
+        except Exception as e:
+            conn.rollback()
+            app.logger.error(f"Error deleting operation {op_id}: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
 
 @app.route('/api/tasks/delete', methods=['POST'])
 def delete_task():
@@ -309,8 +356,12 @@ def delete_task():
             updated_op = fetch_full_operation(cursor, data['operationId'])
         return jsonify(updated_op)
     except Exception as e:
-        conn.rollback(); return jsonify({'error': str(e)}), 500
-    finally: conn.close()
+        conn.rollback()
+        app.logger.error(f"Error deleting task: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
         
 @app.route('/api/tasks/edit', methods=['PUT'])
 def edit_task():
@@ -330,8 +381,12 @@ def edit_task():
             updated_op = fetch_full_operation(cursor, data['operationId'])
         return jsonify(updated_op)
     except Exception as e:
-        conn.rollback(); return jsonify({'error': str(e)}), 500
-    finally: conn.close()
+        conn.rollback()
+        app.logger.error(f"Error editing task: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 @app.route('/api/audit_logs', methods=['GET'])
 def get_audit_logs():
@@ -341,10 +396,15 @@ def get_audit_logs():
             cursor.execute("SELECT * FROM cri.crm.audit_logs ORDER BY timestamp DESC")
             logs = [format_row(row, cursor) for row in cursor.fetchall()]
             for log in logs:
-                log['timestamp'] = log['timestamp'].isoformat()
+                if log.get('timestamp'):
+                    log['timestamp'] = log['timestamp'].isoformat()
             return jsonify(logs)
+    except Exception as e:
+        app.logger.error(f"Error fetching audit logs: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 # ================== Servidor de Frontend ==================
 @app.route('/', defaults={'path': ''})
