@@ -1,5 +1,4 @@
 
-import re
 import os
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -10,15 +9,10 @@ from datetime import datetime, date, timedelta
 # Configura o Flask para servir os arquivos estáticos da pasta raiz do projeto
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'), static_url_path='')
 
-# Configuração de CORS pronta para produção
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
-if allowed_origins_env:
-    origins = allowed_origins_env.split(',')
-else:
-    # Fallback para desenvolvimento local (ex: GitHub Codespaces)
-    origins = re.compile(r"https?://.*\.app\.github\.dev")
-
-CORS(app, origins=origins, supports_credentials=True)
+# Configuração de CORS para permitir requisições de qualquer origem.
+# Isso é essencial para que o frontend (rodando em um domínio diferente, como o do AI Studio)
+# possa se comunicar com este backend sem ser bloqueado pela política de segurança do navegador.
+CORS(app, supports_credentials=True)
 
 
 def format_row(row, cursor):
