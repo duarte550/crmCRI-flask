@@ -63,7 +63,7 @@ def fetch_full_operation(cursor, operation_id):
     Busca uma operação completa com todos os seus dados, garantindo que todas as chaves
     sejam convertidas para camelCase para o frontend.
     """
-    cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (operation_id,))
+    cursor.execute("SELECT o.*, orn.notes FROM cri.crm.operations o LEFT JOIN cri.crm.operation_review_notes orn ON o.id = orn.operation_id WHERE o.id = ?", (operation_id,))
     op_row = cursor.fetchone()
     if not op_row:
         return None
@@ -86,7 +86,8 @@ def fetch_full_operation(cursor, operation_id):
             'monthlyConstructionReport': operation_db['monitoring_construction_report'],
             'monthlyCommercialInfo': operation_db['monitoring_commercial_info'],
             'speDfs': operation_db['monitoring_spe_dfs']
-        }
+        },
+        'notes': operation_db.get('notes')
     }
 
     # Busca dados relacionados em queries separadas
@@ -122,6 +123,13 @@ def fetch_full_operation(cursor, operation_id):
         'watchlist': rh.get('watchlist'), 'sentiment': rh.get('sentiment'), 'eventId': rh.get('event_id')
     } for rh in db_rh]
 
+    # FIX: Ensure review rules always extend to the maturity date before generating tasks.
+    maturity_date_iso = operation.get('maturityDate')
+    if maturity_date_iso:
+        for rule in operation.get('taskRules', []):
+            if rule.get('name') in ['Revisão Gerencial', 'Revisão Política']:
+                rule['endDate'] = maturity_date_iso
+
     cursor.execute("SELECT task_id FROM cri.crm.task_exceptions WHERE operation_id = ?", (operation_id,))
     task_exceptions = {row.task_id for row in cursor.fetchall()}
 
@@ -129,12 +137,22 @@ def fetch_full_operation(cursor, operation_id):
     operation['tasks'] = tasks
     operation['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
 
-    today = date.today()
-    pending_tasks = [t for t in tasks if t['status'] != 'Concluída' and datetime.fromisoformat(t['dueDate']).date() >= today]
-    next_gerencial_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Gerencial'])
-    next_politica_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Política'])
-    operation['nextReviewGerencial'] = next_gerencial_tasks[0] if next_gerencial_tasks else None
-    operation['nextReviewPolitica'] = next_politica_tasks[0] if next_politica_tasks else None
+    # FIX: Check if operation has matured. If so, no more reviews are due.
+    maturity_date_obj = datetime.fromisoformat(maturity_date_iso).date() if maturity_date_iso else None
+    if maturity_date_obj and maturity_date_obj < date.today():
+        operation['nextReviewGerencialTask'] = None
+        operation['nextReviewPoliticaTask'] = None
+        operation['nextReviewGerencial'] = None
+        operation['nextReviewPolitica'] = None
+    else:
+        pending_and_overdue_tasks = [t for t in tasks if t['status'] != 'Concluída']
+        gerencial_tasks = sorted([t for t in pending_and_overdue_tasks if t['ruleName'] == 'Revisão Gerencial'], key=lambda t: t['dueDate'])
+        politica_tasks = sorted([t for t in pending_and_overdue_tasks if t['ruleName'] == 'Revisão Política'], key=lambda t: t['dueDate'])
+        
+        operation['nextReviewGerencialTask'] = gerencial_tasks[0] if gerencial_tasks else None
+        operation['nextReviewPoliticaTask'] = politica_tasks[0] if politica_tasks else None
+        operation['nextReviewGerencial'] = gerencial_tasks[0]['dueDate'] if gerencial_tasks else None
+        operation['nextReviewPolitica'] = politica_tasks[0]['dueDate'] if politica_tasks else None
 
     return operation
 
@@ -145,7 +163,7 @@ def manage_operations_collection():
     if request.method == 'GET':
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
+                cursor.execute("SELECT o.*, orn.notes FROM cri.crm.operations o LEFT JOIN cri.crm.operation_review_notes orn ON o.id = orn.operation_id ORDER BY o.name")
                 db_operations = [format_row(row, cursor) for row in cursor.fetchall()]
                 if not db_operations: return jsonify([])
 
@@ -162,7 +180,8 @@ def manage_operations_collection():
                         'ratingGroup': op_db['rating_group'], 'watchlist': op_db['watchlist'],
                         'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
                         'defaultMonitoring': { 'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'], 'operationalInfo': op_db['monitoring_operational_info'], 'receivablesPortfolio': op_db['monitoring_receivables_portfolio'], 'monthlyConstructionReport': op_db['monitoring_construction_report'], 'monthlyCommercialInfo': op_db['monitoring_commercial_info'], 'speDfs': op_db['monitoring_spe_dfs'] },
-                        'projects': [], 'guarantees': [], 'events': [], 'taskRules': [], 'ratingHistory': [], 'tasks': []
+                        'projects': [], 'guarantees': [], 'events': [], 'taskRules': [], 'ratingHistory': [], 'tasks': [],
+                        'notes': op_db.get('notes')
                     }
 
                 op_ids = list(operations_map.keys())
@@ -194,15 +213,33 @@ def manage_operations_collection():
                 for row in cursor.fetchall(): exceptions_by_op[row.operation_id].add(row.task_id)
 
                 for op_id, op in operations_map.items():
+                    # FIX: Ensure review rules always extend to the maturity date before generating tasks.
+                    maturity_date_iso = op.get('maturityDate')
+                    if maturity_date_iso:
+                        for rule in op.get('taskRules', []):
+                            if rule.get('name') in ['Revisão Gerencial', 'Revisão Política']:
+                                rule['endDate'] = maturity_date_iso
+
                     tasks = generate_tasks_for_operation(op, exceptions_by_op.get(op_id, set()))
                     op['tasks'] = tasks
                     op['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
-                    today = date.today()
-                    pending_tasks = [t for t in tasks if t['status'] != 'Concluída' and datetime.fromisoformat(t['dueDate']).date() >= today]
-                    next_gerencial_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Gerencial'])
-                    next_politica_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Política'])
-                    op['nextReviewGerencial'] = next_gerencial_tasks[0] if next_gerencial_tasks else None
-                    op['nextReviewPolitica'] = next_politica_tasks[0] if next_politica_tasks else None
+
+                    # FIX: Check if operation has matured. If so, no more reviews are due.
+                    maturity_date_obj = datetime.fromisoformat(maturity_date_iso).date() if maturity_date_iso else None
+                    if maturity_date_obj and maturity_date_obj < date.today():
+                        op['nextReviewGerencialTask'] = None
+                        op['nextReviewPoliticaTask'] = None
+                        op['nextReviewGerencial'] = None
+                        op['nextReviewPolitica'] = None
+                    else:
+                        pending_and_overdue_tasks = [t for t in tasks if t['status'] != 'Concluída']
+                        gerencial_tasks = sorted([t for t in pending_and_overdue_tasks if t['ruleName'] == 'Revisão Gerencial'], key=lambda t: t['dueDate'])
+                        politica_tasks = sorted([t for t in pending_and_overdue_tasks if t['ruleName'] == 'Revisão Política'], key=lambda t: t['dueDate'])
+                        
+                        op['nextReviewGerencialTask'] = gerencial_tasks[0] if gerencial_tasks else None
+                        op['nextReviewPoliticaTask'] = politica_tasks[0] if politica_tasks else None
+                        op['nextReviewGerencial'] = gerencial_tasks[0]['dueDate'] if gerencial_tasks else None
+                        op['nextReviewPolitica'] = politica_tasks[0]['dueDate'] if politica_tasks else None
 
             return jsonify(list(operations_map.values()))
         except Exception as e:
@@ -471,54 +508,42 @@ def get_audit_logs():
     finally:
         if conn: conn.close()
 
-@app.route('/api/review_notes', methods=['GET', 'POST'])
-def manage_review_notes():
+@app.route('/api/operation_review_notes', methods=['POST'])
+def manage_operation_review_notes():
     conn = get_db_connection()
-    if request.method == 'GET':
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT task_id, operation_id, notes FROM cri.crm.review_notes")
-                notes = [format_row(row, cursor) for row in cursor.fetchall()]
-                return jsonify(notes)
-        except Exception as e:
-            app.logger.error(f"Error fetching review notes: {e}", exc_info=True)
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if conn: conn.close()
+    try:
+        data = request.json
+        with conn.cursor() as cursor:
+            # Using MERGE for "upsert" logic
+            cursor.execute("""
+                MERGE INTO cri.crm.operation_review_notes AS target
+                USING (SELECT ? AS operation_id) AS source
+                ON target.operation_id = source.operation_id
+                WHEN MATCHED THEN
+                    UPDATE SET notes = ?, updated_at = ?, updated_by = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (operation_id, notes, updated_at, updated_by)
+                    VALUES (?, ?, ?, ?)
+            """, (
+                data['operationId'], 
+                data['notes'], datetime.now(), data.get('userName', 'System'), # for UPDATE
+                data['operationId'], data['notes'], datetime.now(), data.get('userName', 'System') # for INSERT
+            ))
+            log_action(cursor, data.get('userName', 'System'), 'UPDATE', 'OperationReviewNote', data['operationId'], f"Nota de revisão para operação {data['operationId']} atualizada.")
+        conn.commit()
+        return jsonify({'status': 'success', 'operationId': data['operationId'], 'notes': data['notes']}), 200
+    except Exception as e:
+        app.logger.error(f"Error saving operation review note: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn: conn.close()
 
-    elif request.method == 'POST':
-        try:
-            data = request.json
-            with conn.cursor() as cursor:
-                # Using MERGE for "upsert" logic
-                cursor.execute("""
-                    MERGE INTO cri.crm.review_notes AS target
-                    USING (SELECT ? AS task_id) AS source
-                    ON target.task_id = source.task_id
-                    WHEN MATCHED THEN
-                        UPDATE SET notes = ?, updated_at = ?, updated_by = ?
-                    WHEN NOT MATCHED THEN
-                        INSERT (task_id, operation_id, notes, updated_at, updated_by)
-                        VALUES (?, ?, ?, ?, ?)
-                """, (
-                    data['taskId'], 
-                    data['notes'], datetime.now(), data.get('userName', 'System'), # for UPDATE
-                    data['taskId'], data['operationId'], data['notes'], datetime.now(), data.get('userName', 'System') # for INSERT
-                ))
-                log_action(cursor, data.get('userName', 'System'), 'UPDATE', 'ReviewNote', data['taskId'], f"Nota para tarefa da operação {data['operationId']} atualizada.")
-            conn.commit()
-            return jsonify({'status': 'success', 'taskId': data['taskId'], 'notes': data['notes']}), 200
-        except Exception as e:
-            app.logger.error(f"Error saving review note: {e}", exc_info=True)
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if conn: conn.close()
 
 # ================== Servidor de Frontend ==================
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_react_app(path):
-    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
-        return send_from_directory(app.static_folder, path)
+    if path != "" and os.path.exists(os.path.join(os.path.dirname(__file__), '..', path)):
+        return send_from_directory(os.path.join(os.path.dirname(__file__), '..'), path)
     else:
-        return send_from_directory(app.static_folder, 'index.html')
+        return send_from_directory(os.path.join(os.path.dirname(__file__), '..'), 'index.html')
