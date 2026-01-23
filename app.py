@@ -18,7 +18,10 @@ CORS(app, supports_credentials=True)
 
 # Regras de negócio centralizadas
 RATING_TO_POLITICA_FREQUENCY = {
-    'A4': 'Anual', 'Baa1': 'Anual', 'Baa3': 'Anual', 'Baa4': 'Anual', 'Ba1': 'Anual', 'Ba6': 'Anual',
+    # Anual (Melhor que B1)
+    'A4': 'Anual', 'Baa1': 'Anual', 'Baa3': 'Anual', 'Baa4': 'Anual',
+    'Ba1': 'Anual', 'Ba4': 'Anual', 'Ba5': 'Anual', 'Ba6': 'Anual',
+    # Semestral (B1 ou pior)
     'B1': 'Semestral', 'B2': 'Semestral', 'B3': 'Semestral',
     'C1': 'Semestral', 'C2': 'Semestral', 'C3': 'Semestral',
 }
@@ -280,6 +283,8 @@ def manage_operations_collection():
 
                 if FREQUENCY_VALUE_MAP.get(gerencial_freq, 999) > FREQUENCY_VALUE_MAP.get(politica_freq, 0):
                     gerencial_freq = politica_freq
+                
+                # A frequência de revisão da operação (gerencial) é salva no banco.
                 data['reviewFrequency'] = gerencial_freq
 
                 dm = data.get('defaultMonitoring', {})
