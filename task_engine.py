@@ -51,7 +51,7 @@ def get_next_date(current_date, frequency):
         next_d = next_d.replace(year=next_d.year + 1)
     return next_d
 
-def generate_tasks_for_rule(operation, rule):
+def generate_tasks_for_rule(operation, rule, task_exceptions):
     """ Generates all task instances for a single rule. """
     tasks = []
     # Use a set for efficient lookup
@@ -67,6 +67,9 @@ def generate_tasks_for_rule(operation, rule):
     if rule['frequency'] == 'Pontual':
         due_date = datetime.fromisoformat(rule['startDate']).date()
         task_id = f"op{operation['id']}-rule{rule['id']}-{due_date.isoformat()}"
+
+        if task_id in task_exceptions:
+            return []
         
         status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
         
@@ -88,23 +91,24 @@ def generate_tasks_for_rule(operation, rule):
         due_date = current_date
         task_id = f"op{operation['id']}-rule{rule['id']}-{due_date.isoformat()}"
         
-        status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
+        if task_id not in task_exceptions:
+            status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
 
-        tasks.append({
-            'id': task_id,
-            'operationId': operation['id'],
-            'ruleId': rule['id'],
-            'ruleName': rule['name'],
-            'dueDate': due_date.isoformat() + "T00:00:00",
-            'status': status,
-        })
+            tasks.append({
+                'id': task_id,
+                'operationId': operation['id'],
+                'ruleId': rule['id'],
+                'ruleName': rule['name'],
+                'dueDate': due_date.isoformat() + "T00:00:00",
+                'status': status,
+            })
         current_date = get_next_date(current_date, rule['frequency'])
     
     return tasks
 
-def generate_tasks_for_operation(operation):
+def generate_tasks_for_operation(operation, task_exceptions):
     """ Generates all task instances for all rules within an operation. """
     all_tasks = []
     for rule in operation.get('taskRules', []):
-        all_tasks.extend(generate_tasks_for_rule(operation, rule))
+        all_tasks.extend(generate_tasks_for_rule(operation, rule, task_exceptions))
     return all_tasks
