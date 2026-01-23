@@ -1,3 +1,4 @@
+
 import os
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -470,6 +471,49 @@ def get_audit_logs():
     finally:
         if conn: conn.close()
 
+@app.route('/api/review_notes', methods=['GET', 'POST'])
+def manage_review_notes():
+    conn = get_db_connection()
+    if request.method == 'GET':
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT task_id, operation_id, notes FROM cri.crm.review_notes")
+                notes = [format_row(row, cursor) for row in cursor.fetchall()]
+                return jsonify(notes)
+        except Exception as e:
+            app.logger.error(f"Error fetching review notes: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if conn: conn.close()
+
+    elif request.method == 'POST':
+        try:
+            data = request.json
+            with conn.cursor() as cursor:
+                # Using MERGE for "upsert" logic
+                cursor.execute("""
+                    MERGE INTO cri.crm.review_notes AS target
+                    USING (SELECT ? AS task_id) AS source
+                    ON target.task_id = source.task_id
+                    WHEN MATCHED THEN
+                        UPDATE SET notes = ?, updated_at = ?, updated_by = ?
+                    WHEN NOT MATCHED THEN
+                        INSERT (task_id, operation_id, notes, updated_at, updated_by)
+                        VALUES (?, ?, ?, ?, ?)
+                """, (
+                    data['taskId'], 
+                    data['notes'], datetime.now(), data.get('userName', 'System'), # for UPDATE
+                    data['taskId'], data['operationId'], data['notes'], datetime.now(), data.get('userName', 'System') # for INSERT
+                ))
+                log_action(cursor, data.get('userName', 'System'), 'UPDATE', 'ReviewNote', data['taskId'], f"Nota para tarefa da operação {data['operationId']} atualizada.")
+            conn.commit()
+            return jsonify({'status': 'success', 'taskId': data['taskId'], 'notes': data['notes']}), 200
+        except Exception as e:
+            app.logger.error(f"Error saving review note: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if conn: conn.close()
+
 # ================== Servidor de Frontend ==================
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
@@ -478,5 +522,3 @@ def serve_react_app(path):
         return send_from_directory(app.static_folder, path)
     else:
         return send_from_directory(app.static_folder, 'index.html')
-
-
