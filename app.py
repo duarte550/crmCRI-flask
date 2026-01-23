@@ -14,6 +14,19 @@ app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'
 # Configuração de CORS para permitir requisições de qualquer origem.
 CORS(app, supports_credentials=True)
 
+# Regras de negócio centralizadas
+RATING_TO_POLITICA_FREQUENCY = {
+    'A4': 'Anual', 'Baa1': 'Anual', 'Baa3': 'Anual', 'Baa4': 'Anual', 'Ba1': 'Anual', 'Ba6': 'Anual',
+    'B1': 'Semestral', 'B2': 'Semestral', 'B3': 'Semestral',
+    'C1': 'Semestral', 'C2': 'Semestral', 'C3': 'Semestral',
+}
+
+# Usado para comparar a "velocidade" das frequências. Menor número = mais frequente.
+FREQUENCY_VALUE_MAP = {
+    'Diário': 1, 'Semanal': 7, 'Quinzenal': 15, 'Mensal': 30,
+    'Trimestral': 90, 'Semestral': 180, 'Anual': 365
+}
+
 
 def format_row(row, cursor):
     """ Converte uma linha do banco de dados em um dicionário. """
@@ -169,6 +182,18 @@ def manage_operations_collection():
         try:
             data = request.json
             with conn.cursor() as cursor:
+                # --- Dynamic Frequency Logic on Creation ---
+                politica_freq = RATING_TO_POLITICA_FREQUENCY.get(data['ratingGroup'], 'Anual')
+                gerencial_freq = data['reviewFrequency']
+
+                # Enforce that gerencial is at least as frequent as politica
+                if FREQUENCY_VALUE_MAP.get(gerencial_freq, 999) > FREQUENCY_VALUE_MAP.get(politica_freq, 0):
+                    gerencial_freq = politica_freq
+                
+                # Update the main operation record with the potentially adjusted gerencial frequency
+                data['reviewFrequency'] = gerencial_freq
+                # --- End of Logic ---
+
                 # Insert main operation and get its ID
                 dm = data.get('defaultMonitoring', {})
                 cursor.execute(
@@ -183,8 +208,8 @@ def manage_operations_collection():
                 # Create default task rules and initial rating history
                 today, end_date_iso = datetime.now().isoformat(), data['maturityDate']
                 rules_to_add = [
-                    {'name': 'Revisão Gerencial', 'frequency': data['reviewFrequency'], 'desc': 'Revisão periódica gerencial.'},
-                    {'name': 'Revisão Política', 'frequency': 'Anual', 'desc': 'Revisão de política de crédito anual.'},
+                    {'name': 'Revisão Gerencial', 'frequency': gerencial_freq, 'desc': 'Revisão periódica gerencial.'},
+                    {'name': 'Revisão Política', 'frequency': politica_freq, 'desc': 'Revisão de política de crédito anual.'},
                     {'name': 'Call de Acompanhamento', 'frequency': data['callFrequency'], 'desc': 'Call de acompanhamento.'},
                     {'name': 'Análise de DFs & Dívida', 'frequency': data['dfFrequency'], 'desc': 'Análise dos DFs.'}
                 ]
@@ -218,15 +243,37 @@ def manage_operation(op_id):
                 # Fetch original data for diff logging
                 cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
                 old_op_db = format_row(cursor.fetchone(), cursor) if cursor.rowcount > 0 else {}
-                old_data_for_diff = {
-                    'name': old_op_db.get('name'),
-                    'area': old_op_db.get('area'),
-                    'ratingOperation': old_op_db.get('rating_operation'),
-                    'ratingGroup': old_op_db.get('rating_group'),
-                    'watchlist': old_op_db.get('watchlist'),
-                    'covenants': {'ltv': old_op_db.get('ltv'), 'dscr': old_op_db.get('dscr')}
-                }
+                old_rating_group = old_op_db.get('rating_group')
+                new_rating_group = data['ratingGroup']
                 
+                # --- Dynamic Frequency Logic on Update ---
+                if old_rating_group != new_rating_group:
+                    new_politica_freq = RATING_TO_POLITICA_FREQUENCY.get(new_rating_group, 'Anual')
+                    
+                    # Find the date of the last policy review to reset the schedule
+                    cursor.execute("SELECT MAX(date) FROM cri.crm.events WHERE operation_id = ? AND (title = 'Conclusão: Revisão Política' OR type = 'Revisão Periódica')", (op_id,))
+                    last_review_date_row = cursor.fetchone()
+                    if last_review_date_row and last_review_date_row[0]:
+                        new_start_date = last_review_date_row[0]
+                    else:
+                        cursor.execute("SELECT start_date FROM cri.crm.task_rules WHERE operation_id = ? AND name = 'Revisão Política'", (op_id,))
+                        new_start_date = cursor.fetchone()[0] # Fallback to original start date
+                    
+                    cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, new_start_date, op_id))
+                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq} devido à mudança de rating.")
+
+                    # Now, check and adjust the Gerencial frequency if necessary
+                    cursor.execute("SELECT frequency, start_date FROM cri.crm.task_rules WHERE operation_id = ? AND name = 'Revisão Gerencial'", (op_id,))
+                    gerencial_rule = cursor.fetchone()
+                    if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule[0], 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
+                        cursor.execute("SELECT MAX(date) FROM cri.crm.events WHERE operation_id = ? AND (title = 'Conclusão: Revisão Gerencial' OR type = 'Revisão Periódica')", (op_id,))
+                        last_gerencial_date_row = cursor.fetchone()
+                        new_gerencial_start = last_gerencial_date_row[0] if last_gerencial_date_row and last_gerencial_date_row[0] else gerencial_rule[1]
+
+                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (new_politica_freq, new_gerencial_start, op_id))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq} para alinhar com a política.")
+                # --- End of Logic ---
+
                 # Update main operation table
                 cov = data.get('covenants', {})
                 cursor.execute(
@@ -266,18 +313,17 @@ def manage_operation(op_id):
 
                 for rule in data.get('taskRules', []):
                     rule_id = rule.get('id')
-                    # If the rule ID exists in the database map, it's an update.
                     if rule_id and rule_id in db_rules_map:
-                        cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
-                                       (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule_id))
-                    # Otherwise, it's a new rule with a temporary client ID that needs to be inserted.
+                        # Updates to frequency/start_date for review rules are handled by the dynamic logic above
+                        if rule['name'] not in ['Revisão Política', 'Revisão Gerencial']:
+                            cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
+                                           (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule_id))
                     else:
                         cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", 
                                        (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description']))
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule['name']}' adicionada à operação '{data['name']}'.")
-
-                # Log general operation changes
-                details = generate_diff_details(old_data_for_diff, data, {'name': 'Nome', 'area': 'Área', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist', 'covenants.ltv': 'LTV', 'covenants.dscr': 'DSCR'})
+                
+                details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
                 if details: 
                     log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
             
