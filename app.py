@@ -148,72 +148,82 @@ def fetch_full_operation(cursor, operation_id):
 # ================== Rotas da API ==================
 
 @app.route('/api/operations', methods=['GET', 'POST'])
+@app.route('/api/operations', methods=['GET', 'POST'])
 def operations():
     conn = get_db_connection()
+
     if request.method == 'GET':
         try:
-            with conn.cursor() as cursor:
-                # --- Otimização "1+N": Busca todas as operações e depois os dados relacionados em lotes ---
-                
-                # 1. Busca todas as operações base
-                cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
-                operations_list = [format_row(row, cursor) for row in cursor.fetchall()]
-                
-                if not operations_list:
-                    return jsonify([])
+            def fetch_all_ops():
+                with conn.cursor() as cursor:
+                    # --- Otimização "1+N": Busca todas as operações e depois os dados relacionados em lotes ---
+                    cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
+                    operations_list = [format_row(row, cursor) for row in cursor.fetchall()]
 
-                op_ids = [op['id'] for op in operations_list]
-                operations_map = {op['id']: op for op in operations_list}
+                    if not operations_list:
+                        return []
 
-                # Inicializa as listas de dados relacionados em cada operação
-                for op in operations_map.values():
-                    op['projects'] = []
-                    op['guarantees'] = []
-                    op['events'] = []
-                    op['taskRules'] = []
-                    op['ratingHistory'] = []
-                    op['tasks'] = []
+                    op_ids = [op['id'] for op in operations_list]
+                    operations_map = {op['id']: op for op in operations_list}
 
-                # 2. Busca todos os dados relacionados de uma vez usando "WHERE IN"
-                placeholders = ', '.join(['?'] * len(op_ids))
-                cursor.execute(f"SELECT p.id, p.name, op.operation_id FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id IN ({placeholders})", op_ids)
-                for row in cursor.fetchall():
-                    operations_map[row.operation_id]['projects'].append({'id': row.id, 'name': row.name})
+                    # Inicializa as listas de dados relacionados em cada operação
+                    for op in operations_map.values():
+                        op['projects'] = []
+                        op['guarantees'] = []
+                        op['events'] = []
+                        op['taskRules'] = []
+                        op['ratingHistory'] = []
+                        op['tasks'] = []
 
-                cursor.execute(f"SELECT g.id, g.name, og.operation_id FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id IN ({placeholders})", op_ids)
-                for row in cursor.fetchall():
-                    operations_map[row.operation_id]['guarantees'].append({'id': row.id, 'name': row.name})
+                    # 2. Busca todos os dados relacionados de uma vez usando "WHERE IN"
+                    placeholders = ', '.join(['?'] * len(op_ids))
+                    cursor.execute(f"SELECT p.id, p.name, op.operation_id FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id IN ({placeholders})", op_ids)
+                    for row in cursor.fetchall():
+                        operations_map[row.operation_id]['projects'].append({'id': row.id, 'name': row.name})
 
-                cursor.execute(f"SELECT * FROM cri.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
-                for row in cursor.fetchall():
-                    event = format_row(row, cursor)
-                    if event.get('date'): event['date'] = event['date'].isoformat()
-                    operations_map[row.operation_id]['events'].append(event)
+                    cursor.execute(f"SELECT g.id, g.name, og.operation_id FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id IN ({placeholders})", op_ids)
+                    for row in cursor.fetchall():
+                        operations_map[row.operation_id]['guarantees'].append({'id': row.id, 'name': row.name})
 
-                cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
-                for row in cursor.fetchall(): 
-                    rule = format_row(row, cursor)
-                    if rule.get('startDate'): rule['startDate'] = rule['startDate'].isoformat()
-                    if rule.get('endDate'): rule['endDate'] = rule['endDate'].isoformat()
-                    operations_map[row.operation_id]['taskRules'].append(rule)
+                    cursor.execute(f"SELECT * FROM cri.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
+                    for row in cursor.fetchall():
+                        event = format_row(row, cursor)
+                        if event.get('date'): event['date'] = event['date'].isoformat()
+                        operations_map[row.operation_id]['events'].append(event)
 
-                cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
-                for row in cursor.fetchall(): 
-                    rh = format_row(row, cursor)
-                    if rh.get('date'): rh['date'] = rh['date'].isoformat()
-                    operations_map[row.operation_id]['ratingHistory'].append(rh)
+                    cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
+                    for row in cursor.fetchall():
+                        rule = format_row(row, cursor)
+                        if rule.get('startDate'): rule['startDate'] = rule['startDate'].isoformat()
+                        if rule.get('endDate'): rule['endDate'] = rule['endDate'].isoformat()
+                        operations_map[row.operation_id]['taskRules'].append(rule)
 
-                cursor.execute(f"SELECT task_id, operation_id FROM cri.crm.task_exceptions WHERE operation_id IN ({placeholders})", op_ids)
-                for row in cursor.fetchall():
-                    operations_map[row.operation_id].setdefault('taskExceptions', []).append(row.task_id)
+                    cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
+                    for row in cursor.fetchall():
+                        rh = format_row(row, cursor)
+                        if rh.get('date'): rh['date'] = rh['date'].isoformat()
+                        operations_map[row.operation_id]['ratingHistory'].append(rh)
 
-                # Gerar tarefas para cada operação (pode ser pesado; avalie mover para background se necessário)
-                for op in operations_map.values():
-                    task_exceptions = {t for t in op.get('taskExceptions', [])}
-                    op['tasks'] = generate_tasks_for_operation(op, task_exceptions)
-                    op['overdueCount'] = sum(1 for task in op['tasks'] if task['status'] == 'Atrasada')
+                    cursor.execute(f"SELECT task_id, operation_id FROM cri.crm.task_exceptions WHERE operation_id IN ({placeholders})", op_ids)
+                    for row in cursor.fetchall():
+                        operations_map[row.operation_id].setdefault('taskExceptions', []).append(row.task_id)
 
-                return jsonify(list(operations_map.values()))
+                    # Gerar tarefas para cada operação (pode ser pesado; avalie mover para background se necessário)
+                    for op in operations_map.values():
+                        task_exceptions = {t for t in op.get('taskExceptions', [])}
+                        op['tasks'] = generate_tasks_for_operation(op, task_exceptions)
+                        op['overdueCount'] = sum(1 for task in op['tasks'] if task['status'] == 'Atrasada')
+
+                    return list(operations_map.values())
+
+            # Executa a função do DB com timeout para evitar bloqueio do worker
+            try:
+                ops = run_with_timeout(fetch_all_ops, timeout=15)  # ajuste timeout conforme necessário
+                return jsonify(ops)
+            except concurrent.futures.TimeoutError:
+                logger.error("DB query timed out while fetching operations")
+                return jsonify({"error": "database timeout fetching operations"}), 504
+
         except Exception as e:
             app.logger.error(f"Error fetching operations: {e}", exc_info=True)
             return jsonify({'error': str(e)}), 500
