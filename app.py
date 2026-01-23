@@ -226,7 +226,6 @@ def manage_operations_collection():
                 new_operation_full = fetch_full_operation(cursor, new_op_id)
             return jsonify(new_operation_full), 201
         except Exception as e:
-            conn.rollback()
             app.logger.error(f"Error in POST /api/operations: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
         finally: 
@@ -253,11 +252,17 @@ def manage_operation(op_id):
                     # Find the date of the last policy review to reset the schedule
                     cursor.execute("SELECT MAX(date) FROM cri.crm.events WHERE operation_id = ? AND (title = 'Conclusão: Revisão Política' OR type = 'Revisão Periódica')", (op_id,))
                     last_review_date_row = cursor.fetchone()
+                    
                     if last_review_date_row and last_review_date_row[0]:
                         new_start_date = last_review_date_row[0]
                     else:
                         cursor.execute("SELECT start_date FROM cri.crm.task_rules WHERE operation_id = ? AND name = 'Revisão Política'", (op_id,))
-                        new_start_date = cursor.fetchone()[0] # Fallback to original start date
+                        start_date_row = cursor.fetchone()
+                        if start_date_row:
+                            new_start_date = start_date_row[0]
+                        else:
+                            new_start_date = datetime.now() # Safe fallback
+
                     
                     cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, new_start_date, op_id))
                     log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq} devido à mudança de rating.")
@@ -333,7 +338,6 @@ def manage_operation(op_id):
                 updated_operation_full = fetch_full_operation(cursor, op_id)
             return jsonify(updated_operation_full)
         except Exception as e:
-            conn.rollback()
             app.logger.error(f"Error in PUT /api/operations/{op_id}: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
         finally: 
@@ -357,7 +361,6 @@ def manage_operation(op_id):
             conn.commit()
             return '', 204
         except Exception as e:
-            conn.rollback()
             app.logger.error(f"Error deleting operation {op_id}: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
         finally:
@@ -377,7 +380,6 @@ def delete_task():
             updated_op = fetch_full_operation(cursor, data['operationId'])
         return jsonify(updated_op)
     except Exception as e:
-        conn.rollback()
         app.logger.error(f"Error deleting task: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
     finally:
@@ -402,7 +404,6 @@ def edit_task():
             updated_op = fetch_full_operation(cursor, data['operationId'])
         return jsonify(updated_op)
     except Exception as e:
-        conn.rollback()
         app.logger.error(f"Error editing task: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
     finally:
