@@ -83,12 +83,13 @@ def fetch_full_operation(cursor, operation_id):
         'ratingGroup': operation_db['rating_group'], 'watchlist': operation_db['watchlist'],
         'covenants': {'ltv': operation_db['ltv'], 'dscr': operation_db['dscr']},
         'defaultMonitoring': {
-            'news': operation_db['monitoring_news'], 'fiiReport': operation_db['monitoring_fii_report'],
-            'operationalInfo': operation_db['monitoring_operational_info'],
-            'receivablesPortfolio': operation_db['monitoring_receivables_portfolio'],
-            'monthlyConstructionReport': operation_db['monitoring_construction_report'],
-            'monthlyCommercialInfo': operation_db['monitoring_commercial_info'],
-            'speDfs': operation_db['monitoring_spe_dfs']
+            'news': operation_db.get('monitoring_news') or False,
+            'fiiReport': operation_db.get('monitoring_fii_report') or False,
+            'operationalInfo': operation_db.get('monitoring_operational_info') or False,
+            'receivablesPortfolio': operation_db.get('monitoring_receivables_portfolio') or False,
+            'monthlyConstructionReport': operation_db.get('monitoring_construction_report') or False,
+            'monthlyCommercialInfo': operation_db.get('monitoring_commercial_info') or False,
+            'speDfs': operation_db.get('monitoring_spe_dfs') or False
         },
         'notes': None # Initialize notes as None
     }
@@ -205,7 +206,15 @@ def manage_operations_collection():
                         'segmento': op_db['segmento'], 'ratingOperation': op_db['rating_operation'],
                         'ratingGroup': op_db['rating_group'], 'watchlist': op_db['watchlist'],
                         'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
-                        'defaultMonitoring': { 'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'], 'operationalInfo': op_db['monitoring_operational_info'], 'receivablesPortfolio': op_db['monitoring_receivables_portfolio'], 'monthlyConstructionReport': op_db['monitoring_construction_report'], 'monthlyCommercialInfo': op_db['monitoring_commercial_info'], 'speDfs': op_db['monitoring_spe_dfs'] },
+                        'defaultMonitoring': {
+                            'news': op_db.get('monitoring_news') or False,
+                            'fiiReport': op_db.get('monitoring_fii_report') or False,
+                            'operationalInfo': op_db.get('monitoring_operational_info') or False,
+                            'receivablesPortfolio': op_db.get('monitoring_receivables_portfolio') or False,
+                            'monthlyConstructionReport': op_db.get('monitoring_construction_report') or False,
+                            'monthlyCommercialInfo': op_db.get('monitoring_commercial_info') or False,
+                            'speDfs': op_db.get('monitoring_spe_dfs') or False
+                        },
                         'projects': [], 'guarantees': [], 'events': [], 'taskRules': [], 'ratingHistory': [], 'tasks': [],
                         'notes': notes_map.get(op_id)
                     }
