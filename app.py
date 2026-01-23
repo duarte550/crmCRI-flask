@@ -63,7 +63,7 @@ def fetch_full_operation(cursor, operation_id):
     Busca uma operação completa com todos os seus dados, garantindo que todas as chaves
     sejam convertidas para camelCase para o frontend.
     """
-    cursor.execute("SELECT o.*, orn.notes FROM cri.crm.operations o LEFT JOIN cri.crm.operation_review_notes orn ON o.id = orn.operation_id WHERE o.id = ?", (operation_id,))
+    cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (operation_id,))
     op_row = cursor.fetchone()
     if not op_row:
         return None
@@ -87,8 +87,20 @@ def fetch_full_operation(cursor, operation_id):
             'monthlyCommercialInfo': operation_db['monitoring_commercial_info'],
             'speDfs': operation_db['monitoring_spe_dfs']
         },
-        'notes': operation_db.get('notes')
+        'notes': None # Initialize notes as None
     }
+
+    # Tenta buscar as notas em uma query separada para evitar erro se a tabela não existir
+    try:
+        cursor.execute("SELECT notes FROM cri.crm.operation_review_notes WHERE operation_id = ?", (operation_id,))
+        notes_row = cursor.fetchone()
+        if notes_row:
+            operation['notes'] = notes_row.notes
+    except Exception as e:
+        if "TABLE_OR_VIEW_NOT_FOUND" in str(e):
+            app.logger.warning("Tabela 'operation_review_notes' não encontrada. Pulando campo de notas para a operação ID %s.", operation_id)
+        else:
+            raise e # Re-lança outros erros de DB inesperados
 
     # Busca dados relacionados em queries separadas
     cursor.execute("SELECT p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id = ?", (operation_id,))
@@ -163,9 +175,20 @@ def manage_operations_collection():
     if request.method == 'GET':
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT o.*, orn.notes FROM cri.crm.operations o LEFT JOIN cri.crm.operation_review_notes orn ON o.id = orn.operation_id ORDER BY o.name")
+                cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
                 db_operations = [format_row(row, cursor) for row in cursor.fetchall()]
                 if not db_operations: return jsonify([])
+
+                notes_map = {}
+                try:
+                    cursor.execute("SELECT operation_id, notes FROM cri.crm.operation_review_notes")
+                    for row in cursor.fetchall():
+                        notes_map[row.operation_id] = row.notes
+                except Exception as e:
+                    if "TABLE_OR_VIEW_NOT_FOUND" in str(e):
+                        app.logger.warning("Tabela 'operation_review_notes' não encontrada. Pulando campo de notas para todas as operações.")
+                    else:
+                        raise e
 
                 operations_map = {}
                 for op_db in db_operations:
@@ -181,7 +204,7 @@ def manage_operations_collection():
                         'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
                         'defaultMonitoring': { 'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'], 'operationalInfo': op_db['monitoring_operational_info'], 'receivablesPortfolio': op_db['monitoring_receivables_portfolio'], 'monthlyConstructionReport': op_db['monitoring_construction_report'], 'monthlyCommercialInfo': op_db['monitoring_commercial_info'], 'speDfs': op_db['monitoring_spe_dfs'] },
                         'projects': [], 'guarantees': [], 'events': [], 'taskRules': [], 'ratingHistory': [], 'tasks': [],
-                        'notes': op_db.get('notes')
+                        'notes': notes_map.get(op_id)
                     }
 
                 op_ids = list(operations_map.keys())
