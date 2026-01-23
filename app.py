@@ -1,28 +1,25 @@
 import os
-import json
-import logging
-import concurrent.futures
-from datetime import datetime, date, timedelta
-from collections import defaultdict
-
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-
 from db import get_db_connection
 from task_engine import generate_tasks_for_operation
+from datetime import datetime, date, timedelta
+from collections import defaultdict
+import json
+import logging
 
 # Configurações básicas de logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Configura o Flask para servir os arquivos estáticos da pasta raiz do projeto
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'), static_url_path='')
+logging.basicConfig(level=logging.INFO)
+
+# Configuração de CORS para permitir requisições de qualquer origem.
 CORS(app, supports_credentials=True)
 
 # Regras de negócio centralizadas
 RATING_TO_POLITICA_FREQUENCY = {
     'A4': 'Anual', 'Baa1': 'Anual', 'Baa3': 'Anual', 'Baa4': 'Anual', 'Ba1': 'Anual', 'Ba6': 'Anual',
     'B1': 'Semestral', 'B2': 'Semestral', 'B3': 'Semestral',
+    'C1': 'Semestral', 'C2': 'Semestral', 'C3': 'Semestral',
 }
 
 # Usado para comparar a "velocidade" das frequências. Menor número = mais frequente.
@@ -31,15 +28,6 @@ FREQUENCY_VALUE_MAP = {
     'Trimestral': 90, 'Semestral': 180, 'Anual': 365
 }
 
-def run_with_timeout(func, timeout=10, *args, **kwargs):
-    """
-    Executa func(*args, **kwargs) num ThreadPoolExecutor e retorna o resultado.
-    Lança concurrent.futures.TimeoutError se exceder o timeout.
-    Usar para proteger chamadas de cursor.execute() que possam bloquear.
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(func, *args, **kwargs)
-        return future.result(timeout=timeout)
 
 def format_row(row, cursor):
     """ Converte uma linha do banco de dados em um dicionário. """
@@ -59,14 +47,11 @@ def generate_diff_details(old_data, new_data, fields_to_compare):
     """ Gera uma string de detalhes comparando dados antigos e novos. """
     details = []
     for field, field_name in fields_to_compare.items():
-        old_value = old_data.get(field)
+        # Handle snake_case for old_data from DB and camelCase for new_data from client
+        old_field_key = field.replace('ratingGroup', 'rating_group').replace('ratingOperation', 'rating_operation')
+        old_value = old_data.get(old_field_key)
         new_value = new_data.get(field)
-        # Handle nested dicts like 'covenants'
-        if '.' in field:
-            key1, key2 = field.split('.')
-            old_value = old_data.get(key1, {}).get(key2)
-            new_value = new_data.get(key1, {}).get(key2)
-
+        
         if old_value != new_value:
             details.append(f"Alterou '{field_name}' de '{old_value}' para '{new_value}'")
     return "; ".join(details)
@@ -146,93 +131,106 @@ def fetch_full_operation(cursor, operation_id):
     return operation
 
 # ================== Rotas da API ==================
-
 @app.route('/api/operations', methods=['GET', 'POST'])
-def operations():
+def manage_operations_collection():
     conn = get_db_connection()
     if request.method == 'GET':
         try:
-            # Colocar toda a lógica de leitura do DB dentro de uma função que chamaremos com timeout
-            def fetch_all_ops():
-                with conn.cursor() as cursor:
-                    # --- Otimização "1+N": Busca todas as operações e depois os dados relacionados em lotes ---
-                    
-                    # 1. Busca todas as operações base
-                    cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
-                    operations_list = [format_row(row, cursor) for row in cursor.fetchall()]
-                    
-                    if not operations_list:
-                        return []
+            with conn.cursor() as cursor:
+                # --- Otimização "1+N": Busca todas as operações e depois os dados relacionados em lotes ---
+                
+                # 1. Busca todas as operações base
+                cursor.execute("SELECT * FROM cri.crm.operations ORDER BY name")
+                db_operations = [format_row(row, cursor) for row in cursor.fetchall()]
+                
+                if not db_operations:
+                    return jsonify([])
 
-                    op_ids = [op['id'] for op in operations_list]
-                    operations_map = {op['id']: op for op in operations_list}
+                # FIX: Mapeia snake_case do DB para camelCase do Frontend
+                operations_map = {}
+                for op_db in db_operations:
+                    op_id = op_db['id']
+                    operations_map[op_id] = {
+                        'id': op_id, 'name': op_db['name'], 'area': op_db['area'],
+                        'operationType': op_db['operation_type'],
+                        'maturityDate': op_db['maturity_date'].isoformat() if op_db.get('maturity_date') else None,
+                        'responsibleAnalyst': op_db['responsible_analyst'],
+                        'reviewFrequency': op_db['review_frequency'],
+                        'callFrequency': op_db['call_frequency'],
+                        'dfFrequency': op_db['df_frequency'],
+                        'segmento': op_db['segmento'],
+                        'ratingOperation': op_db['rating_operation'],
+                        'ratingGroup': op_db['rating_group'],
+                        'watchlist': op_db['watchlist'],
+                        'covenants': {'ltv': op_db['ltv'], 'dscr': op_db['dscr']},
+                        'defaultMonitoring': {
+                            'news': op_db['monitoring_news'], 'fiiReport': op_db['monitoring_fii_report'],
+                            'operationalInfo': op_db['monitoring_operational_info'],
+                            'receivablesPortfolio': op_db['monitoring_receivables_portfolio'],
+                            'monthlyConstructionReport': op_db['monitoring_construction_report'],
+                            'monthlyCommercialInfo': op_db['monitoring_commercial_info'],
+                            'speDfs': op_db['monitoring_spe_dfs']
+                        },
+                        'projects': [], 'guarantees': [], 'events': [],
+                        'taskRules': [], 'ratingHistory': [], 'tasks': []
+                    }
 
-                    # Inicializa as listas de dados relacionados em cada operação
-                    for op in operations_map.values():
-                        op['projects'] = []
-                        op['guarantees'] = []
-                        op['events'] = []
-                        op['taskRules'] = []
-                        op['ratingHistory'] = []
-                        op['tasks'] = []
+                op_ids = list(operations_map.keys())
+                placeholders = ', '.join(['?'] * len(op_ids))
+                
+                # 2. Busca todos os dados relacionados de uma vez usando "WHERE IN"
+                cursor.execute(f"SELECT op.operation_id, p.id, p.name FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id IN ({placeholders})", op_ids)
+                for row in cursor.fetchall(): operations_map[row.operation_id]['projects'].append({'id': row.id, 'name': row.name})
 
-                    # 2. Busca todos os dados relacionados de uma vez usando "WHERE IN"
-                    placeholders = ', '.join(['?'] * len(op_ids))
-                    cursor.execute(f"SELECT p.id, p.name, op.operation_id FROM cri.crm.projects p JOIN cri.crm.operation_projects op ON p.id = op.project_id WHERE op.operation_id IN ({placeholders})", op_ids)
-                    for row in cursor.fetchall():
-                        operations_map[row.operation_id]['projects'].append({'id': row.id, 'name': row.name})
+                cursor.execute(f"SELECT og.operation_id, g.id, g.name FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id IN ({placeholders})", op_ids)
+                for row in cursor.fetchall(): operations_map[row.operation_id]['guarantees'].append({'id': row.id, 'name': row.name})
 
-                    cursor.execute(f"SELECT g.id, g.name, og.operation_id FROM cri.crm.guarantees g JOIN cri.crm.operation_guarantees og ON g.id = og.guarantee_id WHERE og.operation_id IN ({placeholders})", op_ids)
-                    for row in cursor.fetchall():
-                        operations_map[row.operation_id]['guarantees'].append({'id': row.id, 'name': row.name})
+                cursor.execute(f"SELECT * FROM cri.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
+                for row in cursor.fetchall(): 
+                    event = format_row(row, cursor)
+                    if event.get('date'): event['date'] = event['date'].isoformat()
+                    operations_map[row.operation_id]['events'].append(event)
 
-                    cursor.execute(f"SELECT * FROM cri.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
-                    for row in cursor.fetchall():
-                        event = format_row(row, cursor)
-                        if event.get('date'): event['date'] = event['date'].isoformat()
-                        operations_map[row.operation_id]['events'].append(event)
+                cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
+                for row in cursor.fetchall(): 
+                    rule = format_row(row, cursor)
+                    if rule.get('startDate'): rule['startDate'] = rule['startDate'].isoformat()
+                    if rule.get('endDate'): rule['endDate'] = rule['endDate'].isoformat()
+                    operations_map[row.operation_id]['taskRules'].append(rule)
 
-                    cursor.execute(f"SELECT * FROM cri.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
-                    for row in cursor.fetchall(): 
-                        rule = format_row(row, cursor)
-                        if rule.get('startDate'): rule['startDate'] = rule['startDate'].isoformat()
-                        if rule.get('endDate'): rule['endDate'] = rule['endDate'].isoformat()
-                        operations_map[row.operation_id]['taskRules'].append(rule)
+                cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
+                for row in cursor.fetchall(): 
+                    rh = format_row(row, cursor)
+                    if rh.get('date'): rh['date'] = rh['date'].isoformat()
+                    operations_map[row.operation_id]['ratingHistory'].append(rh)
 
-                    cursor.execute(f"SELECT * FROM cri.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
-                    for row in cursor.fetchall(): 
-                        rh = format_row(row, cursor)
-                        if rh.get('date'): rh['date'] = rh['date'].isoformat()
-                        operations_map[row.operation_id]['ratingHistory'].append(rh)
+                cursor.execute(f"SELECT operation_id, task_id FROM cri.crm.task_exceptions WHERE operation_id IN ({placeholders})", op_ids)
+                exceptions_by_op = defaultdict(set)
+                for row in cursor.fetchall(): exceptions_by_op[row.operation_id].add(row.task_id)
 
-                    cursor.execute(f"SELECT task_id, operation_id FROM cri.crm.task_exceptions WHERE operation_id IN ({placeholders})", op_ids)
-                    for row in cursor.fetchall():
-                        operations_map[row.operation_id].setdefault('taskExceptions', []).append(row.task_id)
+                # 3. Processa as tarefas e datas de revisão em memória para cada operação
+                for op_id, op in operations_map.items():
+                    task_exceptions = exceptions_by_op.get(op_id, set())
+                    tasks = generate_tasks_for_operation(op, task_exceptions)
+                    op['tasks'] = tasks
+                    op['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
 
-                    # Gerar tarefas para cada operação (pode ser pesado; avalie mover para background se necessário)
-                    for op in operations_map.values():
-                        task_exceptions = {t for t in op.get('taskExceptions', [])}
-                        op['tasks'] = generate_tasks_for_operation(op, task_exceptions)
-                        op['overdueCount'] = sum(1 for task in op['tasks'] if task['status'] == 'Atrasada')
+                    today = date.today()
+                    pending_tasks = [t for t in tasks if t['status'] != 'Concluída' and datetime.fromisoformat(t['dueDate']).date() >= today]
+                    next_gerencial_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Gerencial'])
+                    next_politica_tasks = sorted([t['dueDate'] for t in pending_tasks if t['ruleName'] == 'Revisão Política'])
+                    op['nextReviewGerencial'] = next_gerencial_tasks[0] if next_gerencial_tasks else None
+                    op['nextReviewPolitica'] = next_politica_tasks[0] if next_politica_tasks else None
 
-                    return list(operations_map.values())
-
-            # Executa a função do DB com timeout para evitar bloqueio do worker
-            try:
-                ops = run_with_timeout(fetch_all_ops, timeout=15)  # ajuste timeout conforme necessário
-                return jsonify(ops)
-            except concurrent.futures.TimeoutError:
-                logger.error("DB query timed out while fetching operations")
-                return jsonify({"error": "database timeout fetching operations"}), 504
-
+            return jsonify(list(operations_map.values()))
         except Exception as e:
-            app.logger.error(f"Error fetching operations: {e}", exc_info=True)
-            return jsonify({'error': str(e)}), 500
-        finally:
+            app.logger.error(f"Exception on /api/operations [GET]: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally: 
             if conn:
                 conn.close()
-
-    if request.method == 'POST':
+    
+    elif request.method == 'POST':
         try:
             data = request.json
             with conn.cursor() as cursor:
@@ -268,151 +266,179 @@ def operations():
             conn.commit()
             
             with conn.cursor() as cursor:
-                # Protege fetch_full_operation com timeout para evitar bloqueio indefinido
-                def fetch_full():
-                    return fetch_full_operation(cursor, new_op_id)
-                try:
-                    new_operation_full = run_with_timeout(fetch_full, timeout=12)
-                except concurrent.futures.TimeoutError:
-                    logger.error("DB query timed out while fetching new operation id=%s", new_op_id)
-                    return jsonify({"error": "database timeout fetching operation"}), 504
-
+                new_operation_full = fetch_full_operation(cursor, new_op_id)
             return jsonify(new_operation_full), 201
         except Exception as e:
-            logger.exception("Error creating operation: %s", e)
-            return jsonify({'error': str(e)}), 500
-        finally:
+            app.logger.error(f"Error in POST /api/operations: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally: 
             if conn:
                 conn.close()
-
 
 @app.route('/api/operations/<int:op_id>', methods=['PUT', 'DELETE'])
 def manage_operation(op_id):
     conn = get_db_connection()
     if request.method == 'PUT':
+        data = request.json
         try:
-            data = request.get_json(silent=True)
-            if not isinstance(data, dict):
-                logger.warning("PUT /api/operations/%s - body is not a valid JSON", op_id)
-                return jsonify({"error": "invalid or missing JSON body"}), 400
-
             with conn.cursor() as cursor:
-                # Busca a operação antiga (protegido por timeout)
-                def fetch_old_op():
-                    cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
-                    return cursor.fetchone()
-
-                try:
-                    row = run_with_timeout(fetch_old_op, timeout=12)
-                except concurrent.futures.TimeoutError:
-                    logger.error("DB query timed out while fetching operation id=%s", op_id)
-                    return jsonify({"error": "database timeout"}), 504
-
-                if not row:
-                    return jsonify({"error": "operation not found"}), 404
-
-                old_op_db = format_row(row, cursor)
+                # FIX: Busca dados antigos para comparação e como fallback para chaves ausentes
+                cursor.execute("SELECT * FROM cri.crm.operations WHERE id = ?", (op_id,))
+                old_op_row = cursor.fetchone()
+                if not old_op_row:
+                    return jsonify({"error": f"Operação com id {op_id} não encontrada."}), 404
+                old_op_db = format_row(old_op_row, cursor)
+                
                 old_rating_group = old_op_db.get('rating_group')
-
-                # Para updates parciais: use valor enviado ou mantenha o valor antigo
-                name = data.get('name', old_op_db.get('name'))
-                area = data.get('area', old_op_db.get('area'))
-                rating_operation = data.get('ratingOperation', old_op_db.get('rating_operation'))
-                rating_group = data.get('ratingGroup', old_op_db.get('rating_group'))
-                watchlist = data.get('watchlist', old_op_db.get('watchlist'))
-                cov = data.get('covenants', {})
-                ltv = cov.get('ltv', old_op_db.get('ltv'))
-                dscr = cov.get('dscr', old_op_db.get('dscr'))
-
-                # Se o front enviar listas, use-as, senão considere listas vazias
-                events = data.get('events', [])
-                rating_history = data.get('ratingHistory', [])
-                task_rules = data.get('taskRules', [])
-
-                # Detecta mudança de rating_group para lógica adicional
-                if old_rating_group != rating_group:
+                # FIX: Usa .get() para acessar a chave de forma segura, com fallback para o valor antigo
+                new_rating_group = data.get('ratingGroup', old_rating_group)
+                
+                if old_rating_group != new_rating_group:
                     cursor.execute("SELECT name, frequency, start_date FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                     all_rules = {row.name: {'frequency': row.frequency, 'start_date': row.start_date} for row in cursor.fetchall()}
                     
                     cursor.execute("SELECT type, MAX(date) as max_date FROM cri.crm.events WHERE operation_id = ? AND type = 'Revisão Periódica' GROUP BY type", (op_id,))
                     last_review_date_row = cursor.fetchone()
+                    last_review_date = last_review_date_row.max_date if last_review_date_row else None
 
-                # 1. UPDATE operations table (usar variáveis seguras)
+                    new_politica_freq = RATING_TO_POLITICA_FREQUENCY.get(new_rating_group, 'Anual')
+                    politica_rule = all_rules.get('Revisão Política')
+                    
+                    if politica_rule:
+                        new_politica_start_date = last_review_date or politica_rule['start_date'] or datetime.now()
+                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, new_politica_start_date, op_id))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq}.")
+
+                    gerencial_rule = all_rules.get('Revisão Gerencial')
+                    if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule['frequency'], 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
+                        new_gerencial_start_date = last_review_date or gerencial_rule['start_date'] or datetime.now()
+                        adjusted_gerencial_freq = new_politica_freq
+                        cursor.execute("UPDATE cri.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (adjusted_gerencial_freq, new_gerencial_start_date, op_id))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {adjusted_gerencial_freq}.")
+                
+                # FIX: Prepara os dados para o UPDATE com fallbacks para evitar KeyErrors
+                cov = data.get('covenants', {})
+                name_to_set = data.get('name', old_op_db.get('name'))
+                area_to_set = data.get('area', old_op_db.get('area'))
+                rating_op_to_set = data.get('ratingOperation', old_op_db.get('rating_operation'))
+                watchlist_to_set = data.get('watchlist', old_op_db.get('watchlist'))
+                ltv_to_set = cov.get('ltv', old_op_db.get('ltv'))
+                dscr_to_set = cov.get('dscr', old_op_db.get('dscr'))
+
                 cursor.execute(
-                    "UPDATE cri.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?",
-                    (name, area, rating_operation, rating_group, watchlist, ltv, dscr, op_id)
+                    "UPDATE cri.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?", 
+                    (name_to_set, area_to_set, rating_op_to_set, new_rating_group, watchlist_to_set, ltv_to_set, dscr_to_set, op_id)
                 )
-
-                # 2. INSERT events (novos)
-                for event in events:
+                
+                for event in data.get('events', []):
                     if not isinstance(event.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                       (op_id, event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId')))
+                                       (op_id, event['date'], event['type'], event['title'], event['description'], event['registeredBy'], event['nextSteps'], event.get('completedTaskId')))
+                        log_action(cursor, event['registeredBy'], 'CREATE', 'Event', 'new', f"Evento '{event['title']}' adicionado.")
 
-                # 3. INSERT rating_history entries (novos)
-                for rh in rating_history:
+                for rh in data.get('ratingHistory', []):
                     if not isinstance(rh.get('id'), int):
                         cursor.execute("INSERT INTO cri.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                       (op_id, rh.get('date'), rh.get('ratingOperation'), rh.get('ratingGroup'), rh.get('watchlist'), rh.get('sentiment'), rh.get('eventId')))
+                                       (op_id, rh['date'], rh['ratingOperation'], rh['ratingGroup'], rh['watchlist'], rh['sentiment'], rh['eventId']))
 
-                # 4. UPDATE/INSERT task_rules
                 cursor.execute("SELECT id, name FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
                 db_rules_map = {row.id: row.name for row in cursor.fetchall()}
-                client_rule_ids = {r['id'] for r in task_rules if 'id' in r and isinstance(r['id'], int)}
+                client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
 
-                for db_rule_id in list(db_rules_map.keys()):
-                    if db_rule_id not in client_rule_ids:
-                        cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (db_rule_id,))
+                for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
+                    cursor.execute("DELETE FROM cri.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
+                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'TaskRule', rule_id_to_delete, f"Regra '{db_rules_map[rule_id_to_delete]}' deletada.")
 
-                for r in task_rules:
-                    if isinstance(r.get('id'), int) and r['id'] in db_rules_map:
-                        cursor.execute("UPDATE cri.crm.task_rules SET name = ?, frequency = ?, start_date = ?, end_date = ?, description = ? WHERE id = ?",
-                                       (r.get('name'), r.get('frequency'), r.get('startDate'), r.get('endDate'), r.get('desc'), r['id']))
+                for rule in data.get('taskRules', []):
+                    rule_id = rule.get('id')
+                    if rule_id and rule_id in db_rules_map:
+                        if rule['name'] not in ['Revisão Política', 'Revisão Gerencial']:
+                            cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
+                                           (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule_id))
                     else:
-                        cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)",
-                                       (op_id, r.get('name'), r.get('frequency'), r.get('startDate'), r.get('endDate'), r.get('desc')))
-
-                # 5. INSERT audit_log
-                details = generate_diff_details(old_op_db, data, {
-                    'name': 'Nome', 'area': 'Área', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'
-                })
-                log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
-
+                        cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", 
+                                       (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description']))
+                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule['name']}' adicionada.")
+                
+                details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
+                if details: 
+                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
+            
             conn.commit()
-
-            # Buscar e retornar a operação atualizada (protege com timeout)
+            
             with conn.cursor() as cursor:
-                def fetch_full():
-                    return fetch_full_operation(cursor, op_id)
-                try:
-                    new_operation_full = run_with_timeout(fetch_full, timeout=12)
-                except concurrent.futures.TimeoutError:
-                    logger.error("DB query timed out while fetching full operation id=%s", op_id)
-                    return jsonify({"error": "database timeout fetching operation"}), 504
-
-            return jsonify(new_operation_full), 200
-
+                updated_operation_full = fetch_full_operation(cursor, op_id)
+            return jsonify(updated_operation_full)
         except Exception as e:
-            logger.exception("Erro ao manipular operação %s: %s", op_id, e)
-            return jsonify({"error": "internal server error"}), 500
-        finally:
+            # FIX: Adiciona log aprimorado para depuração
+            app.logger.error(f"Erro ao manipular operação {op_id}: {e}. Dados recebidos: {json.dumps(data)}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally: 
             if conn:
                 conn.close()
 
-    if request.method == 'DELETE':
+    elif request.method == 'DELETE':
         try:
             with conn.cursor() as cursor:
+                cursor.execute("SELECT name, responsible_analyst FROM cri.crm.operations WHERE id = ?", (op_id,))
+                op_info = cursor.fetchone()
+                cursor.execute("DELETE FROM cri.crm.operation_projects WHERE operation_id = ?", (op_id,))
+                cursor.execute("DELETE FROM cri.crm.operation_guarantees WHERE operation_id = ?", (op_id,))
+                cursor.execute("DELETE FROM cri.crm.rating_history WHERE operation_id = ?", (op_id,))
+                cursor.execute("DELETE FROM cri.crm.events WHERE operation_id = ?", (op_id,))
+                cursor.execute("DELETE FROM cri.crm.task_rules WHERE operation_id = ?", (op_id,))
+                cursor.execute("DELETE FROM cri.crm.task_exceptions WHERE operation_id = ?", (op_id,))
                 cursor.execute("DELETE FROM cri.crm.operations WHERE id = ?", (op_id,))
-                log_action(cursor, 'System', 'DELETE', 'Operation', op_id, f"Operação id={op_id} excluída.")
+                log_action(cursor, op_info.responsible_analyst if op_info else 'System', 'DELETE', 'Operation', op_id, f"Operação '{op_info.name if op_info else 'ID: ' + str(op_id)}' deletada.")
             conn.commit()
-            return jsonify({}), 204
+            return '', 204
         except Exception as e:
-            logger.exception("Erro ao deletar operação %s: %s", op_id, e)
-            return jsonify({"error": "internal server error"}), 500
+            app.logger.error(f"Error deleting operation {op_id}: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
         finally:
             if conn:
                 conn.close()
 
+@app.route('/api/tasks/delete', methods=['POST'])
+def delete_task():
+    conn = get_db_connection()
+    try:
+        data = request.json
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO cri.crm.task_exceptions (task_id, operation_id, deleted_at, deleted_by) VALUES (?, ?, ?, ?)", (data['taskId'], data['operationId'], datetime.now(), data.get('responsibleAnalyst')))
+            log_action(cursor, data.get('responsibleAnalyst'), 'DELETE', 'Task', data['taskId'], f"Tarefa deletada para a operação ID {data['operationId']}.")
+        conn.commit()
+        with conn.cursor() as cursor:
+            updated_op = fetch_full_operation(cursor, data['operationId'])
+        return jsonify(updated_op)
+    except Exception as e:
+        app.logger.error(f"Error deleting task: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+        
+@app.route('/api/tasks/edit', methods=['PUT'])
+def edit_task():
+    conn = get_db_connection()
+    try:
+        data = request.json
+        updates = data['updates']
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO cri.crm.task_exceptions (task_id, operation_id, deleted_at, deleted_by) VALUES (?, ?, ?, ?)", (data['originalTaskId'], data['operationId'], datetime.now(), data.get('responsibleAnalyst')))
+            due_date = updates['dueDate']
+            cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, 'Pontual', ?, ?, ?)", (data['operationId'], updates['name'], due_date, due_date, f"Tarefa editada a partir de {data['originalTaskId']}"))
+            log_action(cursor, data.get('responsibleAnalyst'), 'UPDATE', 'Task', data['originalTaskId'], f"Tarefa editada para ter nome '{updates['name']}' e vencimento em {due_date}.")
+        conn.commit()
+        with conn.cursor() as cursor:
+            updated_op = fetch_full_operation(cursor, data['operationId'])
+        return jsonify(updated_op)
+    except Exception as e:
+        app.logger.error(f"Error editing task: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 @app.route('/api/audit_logs', methods=['GET'])
 def get_audit_logs():
@@ -440,16 +466,3 @@ def serve_react_app(path):
         return send_from_directory(app.static_folder, path)
     else:
         return send_from_directory(app.static_folder, 'index.html')
-
-
-if __name__ == '__main__':
-    # Opcional: logar hostname do Databricks (sem expor token)
-    try:
-        host = os.getenv("DATABRICKS_SERVER_HOSTNAME")
-        if host:
-            logger.info("Databricks host configured: %s", host)
-    except Exception:
-        pass
-
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
