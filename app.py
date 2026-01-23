@@ -293,10 +293,13 @@ def manage_operation(op_id):
                     log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'TaskRule', rule_id_to_delete, f"Regra '{db_rules_map[rule_id_to_delete]}' deletada da operação '{data['name']}'.")
 
                 for rule in data.get('taskRules', []):
-                    if isinstance(rule.get('id'), int) and rule['id'] in db_rules_map:
+                    rule_id = rule.get('id')
+                    # If the rule ID exists in the database map, it's an update.
+                    if rule_id and rule_id in db_rules_map:
                         cursor.execute("UPDATE cri.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", 
-                                       (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule['id']))
-                    elif not isinstance(rule.get('id'), int):
+                                       (rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description'], rule_id))
+                    # Otherwise, it's a new rule with a temporary client ID that needs to be inserted.
+                    else:
                         cursor.execute("INSERT INTO cri.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", 
                                        (op_id, rule['name'], rule['frequency'], rule['startDate'], rule['endDate'], rule['description']))
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule['name']}' adicionada à operação '{data['name']}'.")
