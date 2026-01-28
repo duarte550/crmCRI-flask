@@ -448,8 +448,9 @@ def manage_operation(op_id):
                 for rule in data.get('taskRules', []):
                     rule_id = rule.get('id')
                     if rule_id and rule_id in db_rules_map:
-                        if rule.get('name') not in ['Revisão Política', 'Revisão Gerencial']:
-                            cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule_id))
+                        # FIX: Removed the guard that prevented updating 'Revisão Política' and 'Revisão Gerencial'
+                        # This allows the frontend to update the startDate to the actual completion date.
+                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule_id))
                     elif not rule_id or rule_id not in db_rules_map:
                         cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", (op_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description')))
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule.get('name')}' adicionada.")
