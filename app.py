@@ -750,7 +750,11 @@ def manage_change_requests():
                     "INSERT INTO cri_cra_dev.crm.change_requests (title, description, requester, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (data['title'], data['description'], data['requester'], 'pending', now, now)
                 )
-                cursor.execute("SELECT id FROM cri_cra_dev.crm.change_requests WHERE title = ? AND created_at = ? ORDER BY id DESC LIMIT 1", (data['title'], now))
+                # Querying by title and requester to get the latest ID
+                cursor.execute(
+                    "SELECT id FROM cri_cra_dev.crm.change_requests WHERE title = ? AND requester = ? ORDER BY id DESC LIMIT 1", 
+                    (data['title'], data['requester'])
+                )
                 new_id = cursor.fetchone().id
             conn.commit()
             return jsonify({'id': new_id, 'status': 'pending', 'createdAt': now.isoformat(), 'updatedAt': now.isoformat()}), 201
