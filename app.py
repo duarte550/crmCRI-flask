@@ -727,6 +727,76 @@ def manage_operation_review_notes():
     finally:
         if conn: conn.close()
 
+@app.route('/api/change-requests', methods=['GET', 'POST'])
+def manage_change_requests():
+    conn = get_db_connection()
+    try:
+        if request.method == 'GET':
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.change_requests ORDER BY created_at DESC")
+                requests = [format_row(row, cursor) for row in cursor.fetchall()]
+                for req in requests:
+                    req['createdAt'] = req['created_at'].isoformat()
+                    req['updatedAt'] = req['updated_at'].isoformat()
+                    del req['created_at']
+                    del req['updated_at']
+                return jsonify(requests)
+        
+        elif request.method == 'POST':
+            data = request.json
+            now = datetime.now()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO cri_cra_dev.crm.change_requests (title, description, requester, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (data['title'], data['description'], data['requester'], 'pending', now, now)
+                )
+                cursor.execute("SELECT id FROM cri_cra_dev.crm.change_requests WHERE title = ? AND created_at = ? ORDER BY id DESC LIMIT 1", (data['title'], now))
+                new_id = cursor.fetchone().id
+            conn.commit()
+            return jsonify({'id': new_id, 'status': 'pending', 'createdAt': now.isoformat(), 'updatedAt': now.isoformat()}), 201
+            
+    except Exception as e:
+        app.logger.error(f"Error in /api/change-requests: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn: conn.close()
+
+@app.route('/api/change-requests/<int:req_id>', methods=['PUT'])
+def update_change_request(req_id):
+    conn = get_db_connection()
+    try:
+        data = request.json
+        now = datetime.now()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE cri_cra_dev.crm.change_requests SET status = ?, updated_at = ? WHERE id = ?",
+                (data['status'], now, req_id)
+            )
+        conn.commit()
+        return jsonify({'status': 'success', 'updatedAt': now.isoformat()})
+    except Exception as e:
+        app.logger.error(f"Error updating change request {req_id}: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn: conn.close()
+
+@app.route('/api/patch-notes', methods=['GET'])
+def get_patch_notes():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM cri_cra_dev.crm.patch_notes ORDER BY date DESC")
+            notes = [format_row(row, cursor) for row in cursor.fetchall()]
+            for note in notes:
+                note['date'] = note['date'].isoformat()
+                note['changes'] = json.loads(note['changes'])
+            return jsonify(notes)
+    except Exception as e:
+        app.logger.error(f"Error fetching patch notes: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn: conn.close()
+
 
 # ================== Servidor de Frontend ==================
 @app.route('/', defaults={'path': ''})
