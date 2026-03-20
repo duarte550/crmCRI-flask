@@ -4,14 +4,19 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from db import get_db_connection
 from task_engine import generate_tasks_for_operation
+import update_db
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 import json
 import logging
 
 # Configurações básicas de logging
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), '..'), static_url_path='')
+# Serve static files from 'dist' folder in production
+app = Flask(__name__, static_folder='../dist', static_url_path='')
 logging.basicConfig(level=logging.INFO)
+
+# Run schema updates on startup
+update_db.update_schema()
 
 # Configuração de CORS para permitir requisições de qualquer origem.
 CORS(app, supports_credentials=True)
@@ -22,7 +27,7 @@ RATING_TO_POLITICA_FREQUENCY = {
     'A4': 'Anual', 'Baa1': 'Anual', 'Baa3': 'Anual', 'Baa4': 'Anual',
     'Ba1': 'Anual', 'Ba4': 'Anual', 'Ba5': 'Anual', 'Ba6': 'Anual',
     # Semestral (B1 ou pior)
-    'B1': 'Semestral', 'B2': 'Semestral', 'B3': 'Semestral',
+    'B1': 'Semestral', 'B2': 'Semestral', 'B3': 'Semestral', 'B4': 'Semestral',
     'C1': 'Semestral', 'C2': 'Semestral', 'C3': 'Semestral',
 }
 
@@ -77,6 +82,7 @@ def fetch_full_operation(cursor, operation_id):
         'id': operation_db['id'], 'name': operation_db['name'], 'area': operation_db['area'],
         'operationType': operation_db['operation_type'],
         'maturityDate': operation_db['maturity_date'].isoformat() if operation_db.get('maturity_date') else None,
+        'estimatedDate': operation_db.get('estimated_date').isoformat() if operation_db.get('estimated_date') else None,
         'responsibleAnalyst': operation_db['responsible_analyst'], 'reviewFrequency': operation_db['review_frequency'],
         'callFrequency': operation_db['call_frequency'], 'dfFrequency': operation_db['df_frequency'],
         'segmento': operation_db['segmento'], 'ratingOperation': operation_db['rating_operation'],
@@ -128,7 +134,8 @@ def fetch_full_operation(cursor, operation_id):
         'id': r.get('id'), 'name': r.get('name'), 'frequency': r.get('frequency'),
         'startDate': r.get('start_date').isoformat() if r.get('start_date') else None,
         'endDate': r.get('end_date').isoformat() if r.get('end_date') else None,
-        'description': r.get('description')
+        'description': r.get('description'),
+        'priority': r.get('priority')
     } for r in db_rules]
 
     cursor.execute("SELECT * FROM cri_cra_dev.crm.rating_history WHERE operation_id = ? ORDER BY date DESC", (operation_id,))
@@ -201,6 +208,7 @@ def manage_operations_collection():
                         'id': op_id, 'name': op_db['name'], 'area': op_db['area'],
                         'operationType': op_db['operation_type'],
                         'maturityDate': op_db['maturity_date'].isoformat() if op_db.get('maturity_date') else None,
+                        'estimatedDate': op_db.get('estimated_date').isoformat() if op_db.get('estimated_date') else None,
                         'responsibleAnalyst': op_db['responsible_analyst'], 'reviewFrequency': op_db['review_frequency'],
                         'callFrequency': op_db['call_frequency'], 'dfFrequency': op_db['df_frequency'],
                         'segmento': op_db['segmento'], 'ratingOperation': op_db['rating_operation'],
@@ -236,7 +244,15 @@ def manage_operations_collection():
                 cursor.execute(f"SELECT * FROM cri_cra_dev.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
                 for row in cursor.fetchall():
                     rule_db = format_row(row, cursor)
-                    operations_map[row.operation_id]['taskRules'].append({ 'id': rule_db.get('id'), 'name': rule_db.get('name'), 'frequency': rule_db.get('frequency'), 'startDate': rule_db.get('start_date').isoformat() if rule_db.get('start_date') else None, 'endDate': rule_db.get('end_date').isoformat() if rule_db.get('end_date') else None, 'description': rule_db.get('description') })
+                    operations_map[row.operation_id]['taskRules'].append({ 
+                        'id': rule_db.get('id'), 
+                        'name': rule_db.get('name'), 
+                        'frequency': rule_db.get('frequency'), 
+                        'startDate': rule_db.get('start_date').isoformat() if rule_db.get('start_date') else None, 
+                        'endDate': rule_db.get('end_date').isoformat() if rule_db.get('end_date') else None, 
+                        'description': rule_db.get('description'),
+                        'priority': rule_db.get('priority')
+                    })
 
                 cursor.execute(f"SELECT * FROM cri_cra_dev.crm.rating_history WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
                 for row in cursor.fetchall():
@@ -248,7 +264,6 @@ def manage_operations_collection():
                 for row in cursor.fetchall(): exceptions_by_op[row.operation_id].add(row.task_id)
 
                 for op_id, op in operations_map.items():
-                    # FIX: Ensure review rules always extend to the maturity date before generating tasks.
                     maturity_date_iso = op.get('maturityDate')
                     if maturity_date_iso:
                         for rule in op.get('taskRules', []):
@@ -259,7 +274,6 @@ def manage_operations_collection():
                     op['tasks'] = tasks
                     op['overdueCount'] = sum(1 for task in tasks if task['status'] == 'Atrasada')
 
-                    # FIX: Check if operation has matured. If so, no more reviews are due.
                     maturity_date_obj = datetime.fromisoformat(maturity_date_iso).date() if maturity_date_iso else None
                     if maturity_date_obj and maturity_date_obj < date.today():
                         op['nextReviewGerencialTask'] = None
@@ -297,7 +311,10 @@ def manage_operations_collection():
                 data['reviewFrequency'] = gerencial_freq
 
                 dm = data.get('defaultMonitoring', {})
-                cursor.execute( "INSERT INTO cri_cra_dev.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['name'], data['area'], data['operationType'], data['maturityDate'], data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs')) )
+                est_date = data.get('estimatedDate')
+                if est_date == "": est_date = None
+                
+                cursor.execute( "INSERT INTO cri_cra_dev.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs, estimated_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['name'], data['area'], data['operationType'], data['maturityDate'], data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'), est_date) )
                 cursor.execute("SELECT id FROM cri_cra_dev.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
                 new_op_id = cursor.fetchone().id
                 
@@ -329,13 +346,20 @@ def manage_operations_collection():
                         cursor.execute("INSERT INTO cri_cra_dev.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (new_op_id, guarantee_id))
 
                 today, end_date_iso = datetime.now().isoformat(), data['maturityDate']
-                rules_to_add = [ {'name': 'Revisão Gerencial', 'frequency': gerencial_freq, 'desc': 'Revisão periódica gerencial.'}, {'name': 'Revisão Política', 'frequency': politica_freq, 'desc': 'Revisão de política de crédito anual.'}, {'name': 'Call de Acompanhamento', 'frequency': data['callFrequency'], 'desc': 'Call de acompanhamento.'}, {'name': 'Análise de DFs & Dívida', 'frequency': data['dfFrequency'], 'desc': 'Análise dos DFs.'} ]
-                if dm.get('news'): rules_to_add.append({'name': 'Monitorar Notícias', 'frequency': 'Semanal', 'desc': 'Acompanhar notícias.'})
+                rules_to_add = [ {'name': 'Revisão Gerencial', 'frequency': gerencial_freq, 'desc': 'Revisão periódica gerencial.', 'priority': 'Alta'}, {'name': 'Revisão Política', 'frequency': politica_freq, 'desc': 'Revisão de política de crédito anual.', 'priority': 'Alta'}, {'name': 'Call de Acompanhamento', 'frequency': data['callFrequency'], 'desc': 'Call de acompanhamento.', 'priority': 'Média'}, {'name': 'Análise de DFs & Dívida', 'frequency': data['dfFrequency'], 'desc': 'Análise dos DFs.', 'priority': 'Média'} ]
+                if dm.get('news'): rules_to_add.append({'name': 'Monitorar Notícias', 'frequency': 'Semanal', 'desc': 'Acompanhar notícias.', 'priority': 'Baixa'})
                 for rule in rules_to_add:
-                    cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", (new_op_id, rule['name'], rule['frequency'], today, end_date_iso, rule['desc']))
+                    cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority) VALUES (?, ?, ?, ?, ?, ?, ?)", (new_op_id, rule['name'], rule['frequency'], today, end_date_iso, rule['desc'], rule.get('priority') or 'Média'))
                 
                 cursor.execute("INSERT INTO cri_cra_dev.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment) VALUES (?, ?, ?, ?, ?, ?)", (new_op_id, today, data['ratingOperation'], data['ratingGroup'], data['watchlist'], 'Neutro'))
                 
+                # Save notes if provided
+                if data.get('notes'):
+                    cursor.execute(
+                        "INSERT INTO cri_cra_dev.crm.operation_review_notes (operation_id, notes, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                        (new_op_id, data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'))
+                    )
+
                 log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'Operation', new_op_id, f"Operação '{data['name']}' criada na área '{data['area']}'.")
             conn.commit()
             
@@ -348,10 +372,23 @@ def manage_operations_collection():
         finally: 
             if conn: conn.close()
 
-@app.route('/api/operations/<int:op_id>', methods=['PUT', 'DELETE'])
+@app.route('/api/operations/<int:op_id>', methods=['GET', 'PUT', 'DELETE'])
 def manage_operation(op_id):
     conn = get_db_connection()
-    if request.method == 'PUT':
+    if request.method == 'GET':
+        try:
+            with conn.cursor() as cursor:
+                operation = fetch_full_operation(cursor, op_id)
+                if not operation:
+                    return jsonify({"error": "Operation not found"}), 404
+                return jsonify(operation)
+        except Exception as e:
+            app.logger.error(f"Error fetching operation {op_id}: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+        finally:
+            if conn: conn.close()
+
+    elif request.method == 'PUT':
         data = request.json
         try:
             with conn.cursor() as cursor:
@@ -387,8 +424,29 @@ def manage_operation(op_id):
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq}.")
 
                 cov = data.get('covenants', {})
-                cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), op_id) )
                 
+                est_date_val = data.get('estimatedDate')
+                if est_date_val == "": est_date_val = None
+                
+                # If estimatedDate is not in data, use old value. If it is in data (even if None), use it.
+                final_est_date = est_date_val if 'estimatedDate' in data else old_op_db.get('estimated_date')
+
+                cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, data.get('maturityDate', old_op_db.get('maturity_date')), data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), op_id) )
+                
+                # Update notes if provided
+                if 'notes' in data:
+                    cursor.execute("SELECT 1 FROM cri_cra_dev.crm.operation_review_notes WHERE operation_id = ?", (op_id,))
+                    if cursor.fetchone():
+                        cursor.execute(
+                            "UPDATE cri_cra_dev.crm.operation_review_notes SET notes = ?, updated_at = ?, updated_by = ? WHERE operation_id = ?",
+                            (data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'), op_id)
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT INTO cri_cra_dev.crm.operation_review_notes (operation_id, notes, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                            (op_id, data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'))
+                        )
+
                 cursor.execute("DELETE FROM cri_cra_dev.crm.operation_projects WHERE operation_id = ?", (op_id,))
                 for project in data.get('projects', []):
                     project_name = project.get('name')
@@ -450,9 +508,9 @@ def manage_operation(op_id):
                     if rule_id and rule_id in db_rules_map:
                         # FIX: Removed the guard that prevented updating 'Revisão Política' and 'Revisão Gerencial'
                         # This allows the frontend to update the startDate to the actual completion date.
-                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule_id))
+                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=?, priority=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média', rule_id))
                     elif not rule_id or rule_id not in db_rules_map:
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, ?, ?, ?, ?)", (op_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description')))
+                        cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority) VALUES (?, ?, ?, ?, ?, ?, ?)", (op_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média'))
                         log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule.get('name')}' adicionada.")
                 
                 details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
@@ -490,6 +548,99 @@ def manage_operation(op_id):
         finally:
             if conn: conn.close()
 
+@app.route('/api/operations/sync-rules', methods=['POST'])
+def sync_operation_rules():
+    """
+    Endpoint de manutenção para garantir que operações inseridas manualmente
+    tenham suas regras de tarefas e histórico inicial criados.
+    Também corrige datas de início de regras baseadas no histórico existente.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            fixed_count = 0
+            
+            # 1. Busca operações que não possuem NENHUMA regra de tarefa (Criação Inicial)
+            cursor.execute("""
+                SELECT o.id, o.name, o.rating_group, o.review_frequency, o.call_frequency, o.df_frequency, 
+                       o.maturity_date, o.monitoring_news, o.rating_operation, o.watchlist, o.responsible_analyst
+                FROM cri_cra_dev.crm.operations o
+                LEFT JOIN cri_cra_dev.crm.task_rules tr ON o.id = tr.operation_id
+                WHERE tr.operation_id IS NULL
+                LIMIT 10
+            """)
+            ops_to_create_rules = [format_row(row, cursor) for row in cursor.fetchall()]
+            
+            for op in ops_to_create_rules:
+                op_id = op['id']
+                politica_freq = RATING_TO_POLITICA_FREQUENCY.get(op['rating_group'], 'Anual')
+                gerencial_freq = op['review_frequency']
+                
+                if FREQUENCY_VALUE_MAP.get(gerencial_freq, 999) > FREQUENCY_VALUE_MAP.get(politica_freq, 0):
+                    gerencial_freq = politica_freq
+                
+                # Tenta buscar histórico existente para usar como data base
+                cursor.execute("SELECT date FROM cri_cra_dev.crm.rating_history WHERE operation_id = ? ORDER BY date DESC LIMIT 1", (op_id,))
+                last_history = cursor.fetchone()
+                start_date_base = last_history.date if last_history else datetime.now()
+                
+                end_date = op['maturity_date']
+                
+                rules = [
+                    ('Revisão Gerencial', gerencial_freq, 'Revisão periódica gerencial.', 'Alta'),
+                    ('Revisão Política', politica_freq, 'Revisão de política de crédito anual.', 'Alta'),
+                    ('Call de Acompanhamento', op['call_frequency'], 'Call de acompanhamento.', 'Média'),
+                    ('Análise de DFs & Dívida', op['df_frequency'], 'Análise dos DFs.', 'Média')
+                ]
+                
+                if op.get('monitoring_news'):
+                    rules.append(('Monitorar Notícias', 'Semanal', 'Acompanhar notícias.', 'Baixa'))
+                
+                for name, freq, desc, *rest in rules:
+                    priority = rest[0] if rest else 'Média'
+                    cursor.execute("""
+                        INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (op_id, name, freq, start_date_base, end_date, desc, priority))
+                
+                # Se não tinha histórico e usamos datetime.now(), cria o histórico inicial
+                if not last_history:
+                    cursor.execute("""
+                        INSERT INTO cri_cra_dev.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id)
+                        VALUES (?, ?, ?, ?, ?, ?, NULL)
+                    """, (op_id, start_date_base, op['rating_operation'], op['rating_group'], op['watchlist'], 'Neutro'))
+                
+                log_action(cursor, 'System', 'UPDATE', 'Operation', op_id, "Regras criadas via sync.")
+                fixed_count += 1
+
+            # 2. Corrige datas de regras existentes que estão desincronizadas com o histórico
+            # Busca regras onde o start_date é diferente da data do último histórico de rating
+            cursor.execute("""
+                SELECT tr.id, tr.operation_id, tr.name, tr.start_date, MAX(rh.date) as last_history_date
+                FROM cri_cra_dev.crm.task_rules tr
+                JOIN cri_cra_dev.crm.rating_history rh ON tr.operation_id = rh.operation_id
+                WHERE tr.name IN ('Revisão Gerencial', 'Revisão Política')
+                GROUP BY tr.id, tr.operation_id, tr.name, tr.start_date
+                HAVING MAX(rh.date) <> tr.start_date
+                LIMIT 50
+            """)
+            rules_to_fix = [format_row(row, cursor) for row in cursor.fetchall()]
+            
+            for rule in rules_to_fix:
+                # Atualiza start_date para a data do último histórico
+                new_start_date = rule['last_history_date']
+                cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET start_date = ? WHERE id = ?", (new_start_date, rule['id']))
+                log_action(cursor, 'System', 'UPDATE', 'TaskRule', rule['id'], f"Data base da regra '{rule['name']}' corrigida para {new_start_date} (baseado no histórico).")
+                fixed_count += 1
+                
+            conn.commit()
+            return jsonify({"status": "success", "fixed_count": fixed_count, "message": f"{fixed_count} itens processados (criação ou correção)."})
+    except Exception as e:
+        app.logger.error(f"Error syncing operation rules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn: conn.close()
+
 @app.route('/api/tasks/delete', methods=['POST'])
 def delete_task():
     conn = get_db_connection()
@@ -517,7 +668,7 @@ def edit_task():
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO cri_cra_dev.crm.task_exceptions (task_id, operation_id, deleted_at, deleted_by) VALUES (?, ?, ?, ?)", (data['originalTaskId'], data['operationId'], datetime.now(), data.get('responsibleAnalyst')))
             due_date = updates['dueDate']
-            cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description) VALUES (?, ?, 'Pontual', ?, ?, ?)", (data['operationId'], updates['name'], due_date, due_date, f"Tarefa editada a partir de {data['originalTaskId']}"))
+            cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority) VALUES (?, ?, 'Pontual', ?, ?, ?, ?)", (data['operationId'], updates['name'], due_date, due_date, f"Tarefa editada a partir de {data['originalTaskId']}", updates.get('priority') or 'Média'))
             log_action(cursor, data.get('responsibleAnalyst'), 'UPDATE', 'Task', data['originalTaskId'], f"Tarefa editada para ter nome '{updates['name']}' e vencimento em {due_date}.")
         conn.commit()
         with conn.cursor() as cursor:
@@ -581,7 +732,12 @@ def manage_operation_review_notes():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_react_app(path):
-    if path != "" and os.path.exists(os.path.join(os.path.dirname(__file__), '..', path)):
-        return send_from_directory(os.path.join(os.path.dirname(__file__), '..'), path)
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
     else:
-        return send_from_directory(os.path.join(os.path.dirname(__file__), '..'), 'index.html')
+        return send_from_directory(app.static_folder, 'index.html')
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 3000))
+    print(f"Running app on port {port}")
+    app.run(host='0.0.0.0', port=port)
