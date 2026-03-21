@@ -425,195 +425,156 @@ def sync_all_operations():
         if conn: conn.close()
 
 @app.route('/api/operations/<int:op_id>', methods=['GET', 'PUT', 'DELETE'])
-def manage_operation(op_id):
-    conn = get_db_connection()
-    if request.method == 'GET':
-        try:
-            with conn.cursor() as cursor:
-                operation = fetch_full_operation(cursor, op_id)
-                if not operation:
-                    return jsonify({"error": "Operation not found"}), 404
-                return jsonify(operation)
-        except Exception as e:
-            app.logger.error(f"Error fetching operation {op_id}: {e}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
-        finally:
-            if conn: conn.close()
+def update_operation_db(cursor, op_id, data):
+    cursor.execute("SELECT * FROM cri_cra_dev.crm.operations WHERE id = ?", (op_id,))
+    old_op_row = cursor.fetchone()
+    if not old_op_row: raise Exception(f"Operação com id {op_id} não encontrada.")
+    old_op_db = format_row(old_op_row, cursor)
+    
+    cursor.execute("SELECT * FROM cri_cra_dev.crm.events WHERE operation_id = ?", (op_id,))
+    db_events = {row.id: format_row(row, cursor) for row in cursor.fetchall()}
+    db_event_ids = set(db_events.keys())
+    
+    cursor.execute("SELECT id FROM cri_cra_dev.crm.rating_history WHERE operation_id = ?", (op_id,))
+    db_rh_ids = {row.id for row in cursor.fetchall()}
 
-    elif request.method == 'PUT':
-        data = request.json
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT * FROM cri_cra_dev.crm.operations WHERE id = ?", (op_id,))
-                old_op_row = cursor.fetchone()
-                if not old_op_row: return jsonify({"error": f"Operação com id {op_id} não encontrada."}), 404
-                old_op_db = format_row(old_op_row, cursor)
-                
-                cursor.execute("SELECT * FROM cri_cra_dev.crm.events WHERE operation_id = ?", (op_id,))
-                db_events = {row.id: format_row(row, cursor) for row in cursor.fetchall()}
-                db_event_ids = set(db_events.keys())
-                
-                cursor.execute("SELECT id FROM cri_cra_dev.crm.rating_history WHERE operation_id = ?", (op_id,))
-                db_rh_ids = {row.id for row in cursor.fetchall()}
+    old_rating_group, new_rating_group = old_op_db.get('rating_group'), data.get('ratingGroup', old_op_db.get('rating_group'))
+    
+    if old_rating_group != new_rating_group:
+        cursor.execute("SELECT name, frequency, start_date FROM cri_cra_dev.crm.task_rules WHERE operation_id = ?", (op_id,))
+        all_rules = {row.name: {'frequency': row.frequency, 'start_date': row.start_date} for row in cursor.fetchall()}
+        cursor.execute("SELECT type, MAX(date) as max_date FROM cri_cra_dev.crm.events WHERE operation_id = ? AND type = 'Revisão Periódica' GROUP BY type", (op_id,))
+        last_review_date_row = cursor.fetchone()
+        last_review_date = last_review_date_row.max_date if last_review_date_row else None
+        
+        new_politica_freq = RATING_TO_POLITICA_FREQUENCY.get(new_rating_group, 'Anual')
+        if 'Revisão Política' in all_rules:
+            start = last_review_date or all_rules['Revisão Política'].get('start_date') or datetime.now()
+            cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, start, op_id))
+            log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq}.")
 
-                old_rating_group, new_rating_group = old_op_db.get('rating_group'), data.get('ratingGroup', old_op_db.get('rating_group'))
-                
-                if old_rating_group != new_rating_group:
-                    cursor.execute("SELECT name, frequency, start_date FROM cri_cra_dev.crm.task_rules WHERE operation_id = ?", (op_id,))
-                    all_rules = {row.name: {'frequency': row.frequency, 'start_date': row.start_date} for row in cursor.fetchall()}
-                    cursor.execute("SELECT type, MAX(date) as max_date FROM cri_cra_dev.crm.events WHERE operation_id = ? AND type = 'Revisão Periódica' GROUP BY type", (op_id,))
-                    last_review_date_row = cursor.fetchone()
-                    last_review_date = last_review_date_row.max_date if last_review_date_row else None
-                    
-                    new_politica_freq = RATING_TO_POLITICA_FREQUENCY.get(new_rating_group, 'Anual')
-                    if 'Revisão Política' in all_rules:
-                        start = last_review_date or all_rules['Revisão Política'].get('start_date') or datetime.now()
-                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Política'", (new_politica_freq, start, op_id))
-                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão de Política ajustada para {new_politica_freq}.")
+        gerencial_rule = all_rules.get('Revisão Gerencial')
+        if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule.get('frequency'), 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
+            start = last_review_date or gerencial_rule.get('start_date') or datetime.now()
+            cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (new_politica_freq, start, op_id))
+            log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq}.")
 
-                    gerencial_rule = all_rules.get('Revisão Gerencial')
-                    if gerencial_rule and FREQUENCY_VALUE_MAP.get(gerencial_rule.get('frequency'), 999) > FREQUENCY_VALUE_MAP.get(new_politica_freq, 0):
-                        start = last_review_date or gerencial_rule.get('start_date') or datetime.now()
-                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (new_politica_freq, start, op_id))
-                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq}.")
+    cov = data.get('covenants', {})
+    
+    est_date_val = data.get('estimatedDate')
+    if est_date_val == "": est_date_val = None
+    
+    final_est_date = parse_iso_date(est_date_val) if 'estimatedDate' in data else old_op_db.get('estimated_date')
+    final_maturity_date = parse_iso_date(data.get('maturityDate')) if 'maturityDate' in data else old_op_db.get('maturity_date')
+    final_description = data.get('description', old_op_db.get('description'))
+    final_status = data.get('status', old_op_db.get('status'))
+    final_moved_to_legacy_date = parse_iso_date(data.get('movedToLegacyDate')) if 'movedToLegacyDate' in data else old_op_db.get('moved_to_legacy_date')
 
-                cov = data.get('covenants', {})
-                
-                est_date_val = data.get('estimatedDate')
-                if est_date_val == "": est_date_val = None
-                
-                # If estimatedDate is not in data, use old value. If it is in data (even if None), use it.
-                final_est_date = parse_iso_date(est_date_val) if 'estimatedDate' in data else old_op_db.get('estimated_date')
-                final_maturity_date = parse_iso_date(data.get('maturityDate')) if 'maturityDate' in data else old_op_db.get('maturity_date')
-                final_description = data.get('description', old_op_db.get('description'))
-                final_status = data.get('status', old_op_db.get('status'))
-                final_moved_to_legacy_date = parse_iso_date(data.get('movedToLegacyDate')) if 'movedToLegacyDate' in data else old_op_db.get('moved_to_legacy_date')
+    cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ?, moved_to_legacy_date = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, final_moved_to_legacy_date, op_id) )
+    
+    if 'notes' in data:
+        cursor.execute("SELECT 1 FROM cri_cra_dev.crm.operation_review_notes WHERE operation_id = ?", (op_id,))
+        if cursor.fetchone():
+            cursor.execute(
+                "UPDATE cri_cra_dev.crm.operation_review_notes SET notes = ?, updated_at = ?, updated_by = ? WHERE operation_id = ?",
+                (data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'), op_id)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO cri_cra_dev.crm.operation_review_notes (operation_id, notes, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                (op_id, data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'))
+            )
 
-                cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ?, moved_to_legacy_date = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, final_moved_to_legacy_date, op_id) )
-                
-                # Update notes if provided
-                if 'notes' in data:
-                    cursor.execute("SELECT 1 FROM cri_cra_dev.crm.operation_review_notes WHERE operation_id = ?", (op_id,))
-                    if cursor.fetchone():
-                        cursor.execute(
-                            "UPDATE cri_cra_dev.crm.operation_review_notes SET notes = ?, updated_at = ?, updated_by = ? WHERE operation_id = ?",
-                            (data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'), op_id)
-                        )
-                    else:
-                        cursor.execute(
-                            "INSERT INTO cri_cra_dev.crm.operation_review_notes (operation_id, notes, updated_at, updated_by) VALUES (?, ?, ?, ?)",
-                            (op_id, data['notes'], datetime.now(), data.get('responsibleAnalyst', 'System'))
-                        )
+    cursor.execute("DELETE FROM cri_cra_dev.crm.operation_projects WHERE operation_id = ?", (op_id,))
+    for project in data.get('projects', []):
+        project_name = project.get('name')
+        if project_name:
+            cursor.execute("SELECT id FROM cri_cra_dev.crm.projects WHERE name = ?", (project_name,))
+            proj_row = cursor.fetchone()
+            project_id = proj_row.id if proj_row else None
+            if not project_id:
+                cursor.execute("INSERT INTO cri_cra_dev.crm.projects (name) VALUES (?)", (project_name,))
+                cursor.execute("SELECT id FROM cri_cra_dev.crm.projects WHERE name = ? ORDER BY id DESC LIMIT 1", (project_name,))
+                project_id = cursor.fetchone().id
+            cursor.execute("INSERT INTO cri_cra_dev.crm.operation_projects (operation_id, project_id) VALUES (?, ?)", (op_id, project_id))
 
-                cursor.execute("DELETE FROM cri_cra_dev.crm.operation_projects WHERE operation_id = ?", (op_id,))
-                for project in data.get('projects', []):
-                    project_name = project.get('name')
-                    if project_name:
-                        cursor.execute("SELECT id FROM cri_cra_dev.crm.projects WHERE name = ?", (project_name,))
-                        proj_row = cursor.fetchone()
-                        if proj_row:
-                            project_id = proj_row.id
-                        else:
-                            cursor.execute("INSERT INTO cri_cra_dev.crm.projects (name) VALUES (?)", (project_name,))
-                            cursor.execute("SELECT id FROM cri_cra_dev.crm.projects WHERE name = ? ORDER BY id DESC LIMIT 1", (project_name,))
-                            project_id = cursor.fetchone().id
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.operation_projects (operation_id, project_id) VALUES (?, ?)", (op_id, project_id))
+    cursor.execute("DELETE FROM cri_cra_dev.crm.operation_guarantees WHERE operation_id = ?", (op_id,))
+    for guarantee in data.get('guarantees', []):
+        guarantee_name = guarantee.get('name')
+        if guarantee_name:
+            cursor.execute("SELECT id FROM cri_cra_dev.crm.guarantees WHERE name = ?", (guarantee_name,))
+            guar_row = cursor.fetchone()
+            guarantee_id = guar_row.id if guar_row else None
+            if not guarantee_id:
+                cursor.execute("INSERT INTO cri_cra_dev.crm.guarantees (name) VALUES (?)", (guarantee_name,))
+                cursor.execute("SELECT id FROM cri_cra_dev.crm.guarantees WHERE name = ? ORDER BY id DESC LIMIT 1", (guarantee_name,))
+                guarantee_id = cursor.fetchone().id
+            cursor.execute("INSERT INTO cri_cra_dev.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (op_id, guarantee_id))
 
-                cursor.execute("DELETE FROM cri_cra_dev.crm.operation_guarantees WHERE operation_id = ?", (op_id,))
-                for guarantee in data.get('guarantees', []):
-                    guarantee_name = guarantee.get('name')
-                    if guarantee_name:
-                        cursor.execute("SELECT id FROM cri_cra_dev.crm.guarantees WHERE name = ?", (guarantee_name,))
-                        guar_row = cursor.fetchone()
-                        if guar_row:
-                            guarantee_id = guar_row.id
-                        else:
-                            cursor.execute("INSERT INTO cri_cra_dev.crm.guarantees (name) VALUES (?)", (guarantee_name,))
-                            cursor.execute("SELECT id FROM cri_cra_dev.crm.guarantees WHERE name = ? ORDER BY id DESC LIMIT 1", (guarantee_name,))
-                            guarantee_id = cursor.fetchone().id
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (op_id, guarantee_id))
-
-                # FIX: Correctly link new rating_history entries to newly created events
-                client_event_id_to_db_id_map = {}
-                for event in data.get('events', []):
-                    if event.get('id') not in db_event_ids:
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id, attention_points, our_attendees, operation_attendees) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (op_id, event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees')))
-                        # Fetch the real ID generated by the database
-                        cursor.execute("SELECT id FROM cri_cra_dev.crm.events WHERE operation_id = ? AND date = ? AND title = ? ORDER BY id DESC LIMIT 1", (op_id, event.get('date'), event.get('title')))
-                        new_event_row = cursor.fetchone()
-                        if new_event_row:
-                            db_event_id = new_event_row.id
-                            client_event_id_to_db_id_map[event.get('id')] = db_event_id
-                            log_action(cursor, event.get('registeredBy'), 'CREATE', 'Event', db_event_id, f"Evento '{event.get('title')}' adicionado.")
-                    else:
-                        old_event = db_events[event.get('id')]
-                        def norm(v): return str(v).strip() if v is not None else ""
-                        def norm_date(v): return str(v)[:10] if v is not None else ""
-                        
-                        changed = (
-                            norm_date(event.get('date')) != norm_date(old_event.get('date')) or
-                            norm(event.get('type')) != norm(old_event.get('type')) or
-                            norm(event.get('title')) != norm(old_event.get('title')) or
-                            norm(event.get('description')) != norm(old_event.get('description')) or
-                            norm(event.get('registeredBy')) != norm(old_event.get('registered_by')) or
-                            norm(event.get('nextSteps')) != norm(old_event.get('next_steps')) or
-                            norm(event.get('completedTaskId')) != norm(old_event.get('completed_task_id')) or
-                            norm(event.get('attentionPoints')) != norm(old_event.get('attention_points')) or
-                            norm(event.get('ourAttendees')) != norm(old_event.get('our_attendees')) or
-                            norm(event.get('operationAttendees')) != norm(old_event.get('operation_attendees'))
-                        )
-                        
-                        if changed:
-                            cursor.execute(
-                                "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=?, our_attendees=?, operation_attendees=? WHERE id=?",
-                                (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees'), event.get('id'))
-                            )
-                            log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
-
-                for rh in data.get('ratingHistory', []):
-                    if rh.get('id') not in db_rh_ids:
-                        client_event_id = rh.get('eventId')
-                        # Use the map to find the real DB ID, otherwise keep what was sent (could be null)
-                        db_event_id_for_rh = client_event_id_to_db_id_map.get(client_event_id, client_event_id)
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)", (op_id, rh.get('date'), rh.get('ratingOperation'), rh.get('ratingGroup'), rh.get('watchlist'), rh.get('sentiment'), db_event_id_for_rh))
-
-                cursor.execute("SELECT id, name FROM cri_cra_dev.crm.task_rules WHERE operation_id = ?", (op_id,))
-                db_rules_map = {row.id: row.name for row in cursor.fetchall()}
-                client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
-
-                for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
-                    cursor.execute("DELETE FROM cri_cra_dev.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
-                    log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'TaskRule', rule_id_to_delete, f"Regra '{db_rules_map[rule_id_to_delete]}' deletada.")
-
-                for rule in data.get('taskRules', []):
-                    rule_id = rule.get('id')
-                    if rule_id and rule_id in db_rules_map:
-                        # FIX: Removed the guard that prevented updating 'Revisão Política' and 'Revisão Gerencial'
-                        # This allows the frontend to update the startDate to the actual completion date.
-                        cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=?, priority=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média', rule_id))
-                    elif not rule_id or rule_id not in db_rules_map:
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority) VALUES (?, ?, ?, ?, ?, ?, ?)", (op_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média'))
-                        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule.get('name')}' adicionada.")
-                
-                # Sync task_exceptions
-                if 'taskExceptions' in data:
-                    cursor.execute("DELETE FROM cri_cra_dev.crm.task_exceptions WHERE operation_id = ?", (op_id,))
-                    for task_id in data['taskExceptions']:
-                        cursor.execute("INSERT INTO cri_cra_dev.crm.task_exceptions (operation_id, task_id) VALUES (?, ?)", (op_id, task_id))
-
-                details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
-                if details: log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
+    client_event_id_to_db_id_map = {}
+    for event in data.get('events', []):
+        if event.get('id') not in db_event_ids:
+            cursor.execute("INSERT INTO cri_cra_dev.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id, attention_points, our_attendees, operation_attendees) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (op_id, event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees')))
+            cursor.execute("SELECT id FROM cri_cra_dev.crm.events WHERE operation_id = ? AND date = ? AND title = ? ORDER BY id DESC LIMIT 1", (op_id, event.get('date'), event.get('title')))
+            new_event_row = cursor.fetchone()
+            if new_event_row:
+                db_event_id = new_event_row.id
+                client_event_id_to_db_id_map[event.get('id')] = db_event_id
+                log_action(cursor, event.get('registeredBy'), 'CREATE', 'Event', db_event_id, f"Evento '{event.get('title')}' adicionado.")
+        else:
+            old_event = db_events[event.get('id')]
+            def norm(v): return str(v).strip() if v is not None else ""
+            def norm_date(v): return str(v)[:10] if v is not None else ""
             
-            conn.commit()
+            changed = (
+                norm_date(event.get('date')) != norm_date(old_event.get('date')) or
+                norm(event.get('type')) != norm(old_event.get('type')) or
+                norm(event.get('title')) != norm(old_event.get('title')) or
+                norm(event.get('description')) != norm(old_event.get('description')) or
+                norm(event.get('registeredBy')) != norm(old_event.get('registered_by')) or
+                norm(event.get('nextSteps')) != norm(old_event.get('next_steps')) or
+                norm(event.get('completedTaskId')) != norm(old_event.get('completed_task_id')) or
+                norm(event.get('attentionPoints')) != norm(old_event.get('attention_points')) or
+                norm(event.get('ourAttendees')) != norm(old_event.get('our_attendees')) or
+                norm(event.get('operationAttendees')) != norm(old_event.get('operation_attendees'))
+            )
             
-            with conn.cursor() as cursor:
-                updated_operation_full = fetch_full_operation(cursor, op_id)
-            return jsonify(updated_operation_full)
-        except Exception as e:
-            app.logger.error(f"Erro ao manipular operação {op_id}: {e}. Dados recebidos: {json.dumps(data)}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
-        finally: 
-            if conn: conn.close()
+            if changed:
+                cursor.execute(
+                    "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=?, our_attendees=?, operation_attendees=? WHERE id=?",
+                    (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees'), event.get('id'))
+                )
+                log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
+
+    for rh in data.get('ratingHistory', []):
+        if rh.get('id') not in db_rh_ids:
+            client_event_id = rh.get('eventId')
+            db_event_id_for_rh = client_event_id_to_db_id_map.get(client_event_id, client_event_id)
+            cursor.execute("INSERT INTO cri_cra_dev.crm.rating_history (operation_id, date, rating_operation, rating_group, watchlist, sentiment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)", (op_id, rh.get('date'), rh.get('ratingOperation'), rh.get('ratingGroup'), rh.get('watchlist'), rh.get('sentiment'), db_event_id_for_rh))
+
+    cursor.execute("SELECT id, name FROM cri_cra_dev.crm.task_rules WHERE operation_id = ?", (op_id,))
+    db_rules_map = {row.id: row.name for row in cursor.fetchall()}
+    client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
+
+    for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
+        cursor.execute("DELETE FROM cri_cra_dev.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
+        log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'TaskRule', rule_id_to_delete, f"Regra '{db_rules_map[rule_id_to_delete]}' deletada.")
+
+    for rule in data.get('taskRules', []):
+        rule_id = rule.get('id')
+        if rule_id and rule_id in db_rules_map:
+            cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=?, priority=? WHERE id=?", (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média', rule_id))
+        elif not rule_id or rule_id not in db_rules_map:
+            cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (operation_id, name, frequency, start_date, end_date, description, priority) VALUES (?, ?, ?, ?, ?, ?, ?)", (op_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média'))
+            log_action(cursor, data.get('responsibleAnalyst', 'System'), 'CREATE', 'TaskRule', 'new', f"Regra '{rule.get('name')}' adicionada.")
+    
+    if 'taskExceptions' in data:
+        cursor.execute("DELETE FROM cri_cra_dev.crm.task_exceptions WHERE operation_id = ?", (op_id,))
+        for task_id in data['taskExceptions']:
+            cursor.execute("INSERT INTO cri_cra_dev.crm.task_exceptions (operation_id, task_id) VALUES (?, ?)", (op_id, task_id))
+
+    details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
+    if details: log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
 
     elif request.method == 'DELETE':
         try:
@@ -635,6 +596,31 @@ def manage_operation(op_id):
             return jsonify({"error": str(e)}), 500
         finally:
             if conn: conn.close()
+
+@app.route('/api/operations/bulk-update', methods=['POST'])
+def bulk_update_operations():
+    conn = get_db_connection()
+    try:
+        data = request.json
+        operations = data.get('operations', [])
+        results = {'success': [], 'failed': []}
+        
+        with conn.cursor() as cursor:
+            for op_data in operations:
+                try:
+                    update_operation_db(cursor, op_data['id'], op_data)
+                    results['success'].append(op_data['id'])
+                except Exception as e:
+                    app.logger.error(f"Error updating operation {op_data.get('id')}: {e}", exc_info=True)
+                    results['failed'].append({'id': op_data.get('id'), 'error': str(e)})
+            
+            conn.commit()
+        return jsonify(results), 200
+    except Exception as e:
+        app.logger.error(f"Error in bulk update: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn: conn.close()
 
 @app.route('/api/operations/sync-rules', methods=['POST'])
 def sync_operation_rules():
