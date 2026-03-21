@@ -514,6 +514,12 @@ def manage_operation(op_id):
                             db_event_id = new_event_row.id
                             client_event_id_to_db_id_map[event.get('id')] = db_event_id
                             log_action(cursor, event.get('registeredBy'), 'CREATE', 'Event', db_event_id, f"Evento '{event.get('title')}' adicionado.")
+                    else:
+                        cursor.execute(
+                            "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=? WHERE id=?",
+                            (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('id'))
+                        )
+                        log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
 
                 for rh in data.get('ratingHistory', []):
                     if rh.get('id') not in db_rh_ids:
