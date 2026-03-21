@@ -424,8 +424,8 @@ def sync_all_operations():
     finally:
         if conn: conn.close()
 
-@app.route('/api/operations/<int:op_id>', methods=['GET', 'PUT', 'DELETE'])
-def update_operation_db(cursor, op_id, data):
+# Internal helper function for updating operation in DB
+def _update_operation_db_internal(cursor, op_id, data):
     cursor.execute("SELECT * FROM cri_cra_dev.crm.operations WHERE id = ?", (op_id,))
     old_op_row = cursor.fetchone()
     if not old_op_row: raise Exception(f"Operação com id {op_id} não encontrada.")
@@ -512,17 +512,27 @@ def update_operation_db(cursor, op_id, data):
             cursor.execute("INSERT INTO cri_cra_dev.crm.operation_guarantees (operation_id, guarantee_id) VALUES (?, ?)", (op_id, guarantee_id))
 
     client_event_id_to_db_id_map = {}
+    
     for event in data.get('events', []):
-        if event.get('id') not in db_event_ids:
+        event_id = str(event.get('id'))
+        
+        # Explicit deletion
+        if event.get('deleted'):
+            if event_id in db_event_ids:
+                cursor.execute("DELETE FROM cri_cra_dev.crm.events WHERE id = ?", (int(event_id),))
+                log_action(cursor, data.get('responsibleAnalyst', 'System'), 'DELETE', 'Event', event_id, "Evento deletado explicitamente.")
+            continue
+
+        if event_id not in db_event_ids:
             cursor.execute("INSERT INTO cri_cra_dev.crm.events (operation_id, date, type, title, description, registered_by, next_steps, completed_task_id, attention_points, our_attendees, operation_attendees) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (op_id, event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees')))
             cursor.execute("SELECT id FROM cri_cra_dev.crm.events WHERE operation_id = ? AND date = ? AND title = ? ORDER BY id DESC LIMIT 1", (op_id, event.get('date'), event.get('title')))
             new_event_row = cursor.fetchone()
             if new_event_row:
                 db_event_id = new_event_row.id
-                client_event_id_to_db_id_map[event.get('id')] = db_event_id
+                client_event_id_to_db_id_map[event_id] = db_event_id
                 log_action(cursor, event.get('registeredBy'), 'CREATE', 'Event', db_event_id, f"Evento '{event.get('title')}' adicionado.")
         else:
-            old_event = db_events[event.get('id')]
+            old_event = db_events[int(event_id)]
             def norm(v): return str(v).strip() if v is not None else ""
             def norm_date(v): return str(v)[:10] if v is not None else ""
             
@@ -542,9 +552,9 @@ def update_operation_db(cursor, op_id, data):
             if changed:
                 cursor.execute(
                     "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=?, our_attendees=?, operation_attendees=? WHERE id=?",
-                    (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees'), event.get('id'))
+                    (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('ourAttendees'), event.get('operationAttendees'), event_id)
                 )
-                log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
+                log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event_id, f"Evento '{event.get('title')}' atualizado.")
 
     for rh in data.get('ratingHistory', []):
         if rh.get('id') not in db_rh_ids:
@@ -576,8 +586,28 @@ def update_operation_db(cursor, op_id, data):
     details = generate_diff_details(old_op_db, data, {'name': 'Nome', 'ratingOperation': 'Rating Op.', 'ratingGroup': 'Rating Grupo', 'watchlist': 'Watchlist'})
     if details: log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'Operation', op_id, details)
 
-    elif request.method == 'DELETE':
-        try:
+
+
+@app.route('/api/operations/<int:op_id>', methods=['GET', 'PUT', 'DELETE'])
+def manage_operation(op_id):
+    conn = get_db_connection()
+    try:
+        if request.method == 'GET':
+            with conn.cursor() as cursor:
+                operation = fetch_full_operation(cursor, op_id)
+                if not operation:
+                    return jsonify({"error": "Operação não encontrada"}), 404
+                return jsonify(operation)
+        
+        elif request.method == 'PUT':
+            data = request.json
+            with conn.cursor() as cursor:
+                _update_operation_db_internal(cursor, op_id, data)
+                conn.commit()
+                new_operation_full = fetch_full_operation(cursor, op_id)
+            return jsonify(new_operation_full), 200
+            
+        elif request.method == 'DELETE':
             with conn.cursor() as cursor:
                 cursor.execute("SELECT name, responsible_analyst FROM cri_cra_dev.crm.operations WHERE id = ?", (op_id,))
                 op_info = cursor.fetchone()
@@ -591,13 +621,11 @@ def update_operation_db(cursor, op_id, data):
                 log_action(cursor, op_info.responsible_analyst if op_info else 'System', 'DELETE', 'Operation', op_id, f"Operação '{op_info.name if op_info else 'ID: ' + str(op_id)}' deletada.")
             conn.commit()
             return '', 204
-        except Exception as e:
-            app.logger.error(f"Error deleting operation {op_id}: {e}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
-        finally:
-            if conn: conn.close()
-
-@app.route('/api/operations/bulk-update', methods=['POST'])
+    except Exception as e:
+        app.logger.error(f"Error in /api/operations/{op_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn: conn.close()
 def bulk_update_operations():
     conn = get_db_connection()
     try:
