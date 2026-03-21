@@ -75,11 +75,16 @@ def update_schema():
 
             print("Checking if description column exists in operations...")
             cursor.execute("DESCRIBE cri_cra_dev.crm.operations")
-            op_columns = [row.col_name for row in cursor.fetchall()]
+            op_columns = [row.col_name.lower() for row in cursor.fetchall()]
             if 'description' not in op_columns:
                 print("Adding description column to operations...")
                 cursor.execute("ALTER TABLE cri_cra_dev.crm.operations ADD COLUMN description STRING COMMENT 'Descrição detalhada da operação.'")
                 print("Column description added successfully.")
+
+            if 'status' not in op_columns:
+                print("Adding status column to operations...")
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.operations ADD COLUMN status STRING DEFAULT 'Ativa' COMMENT 'Status da operação (Ativa, Legado).'")
+                print("Column status added successfully.")
 
             print("Ensuring operation_risks table exists...")
             cursor.execute("""
@@ -94,6 +99,14 @@ def update_schema():
                 ) COMMENT 'Armazena riscos e pontos de atenção identificados para cada operação.'
             """)
             print("Table operation_risks checked/created.")
+            
+            print("Checking if attention_points column exists in events...")
+            cursor.execute("DESCRIBE cri_cra_dev.crm.events")
+            event_columns = [row.col_name for row in cursor.fetchall()]
+            if 'attention_points' not in event_columns:
+                print("Adding attention_points column to events...")
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.events ADD COLUMN attention_points STRING COMMENT 'Pontos de atenção registrados na revisão.'")
+                print("Column attention_points added successfully.")
 
             print("Checking if patch_notes is empty...")
             cursor.execute("SELECT COUNT(*) as count FROM cri_cra_dev.crm.patch_notes")
