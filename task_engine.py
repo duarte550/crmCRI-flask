@@ -1,6 +1,7 @@
 
 from datetime import date, timedelta, datetime
 import calendar
+from utils import safe_isoformat, parse_iso_date
 
 def get_next_date(current_date, frequency):
     """
@@ -83,8 +84,10 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
 
     # Handle one-off 'Pontual' tasks
     if rule['frequency'] == 'Pontual':
-        due_date = datetime.fromisoformat(rule['startDate']).date()
-        task_id = f"op{operation['id']}-rule{rule['id']}-{due_date.isoformat()}"
+        due_date = parse_iso_date(rule['startDate'])
+        if hasattr(due_date, 'date'):
+            due_date = due_date.date()
+        task_id = f"op{operation['id']}-rule{rule['id']}-{safe_isoformat(due_date)}"
 
         if task_id in task_exceptions:
             return []
@@ -96,7 +99,7 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
             'operationId': operation['id'],
             'ruleId': rule['id'],
             'ruleName': rule['name'],
-            'dueDate': due_date.isoformat() + "T00:00:00",
+            'dueDate': safe_isoformat(due_date) + "T00:00:00" if due_date else None,
             'status': status,
             'priority': rule.get('priority') or 'Média',
             'notes': rule.get('description')
@@ -104,10 +107,14 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
         return tasks
 
     # Handle recurring tasks
-    start_date_obj = datetime.fromisoformat(rule['startDate']).date()
+    start_date_obj = parse_iso_date(rule['startDate'])
+    if hasattr(start_date_obj, 'date'):
+        start_date_obj = start_date_obj.date()
     # FIX: The first due date is one frequency period AFTER the start date.
     current_date = get_next_date(start_date_obj, rule['frequency'])
-    end_date = datetime.fromisoformat(rule['endDate']).date()
+    end_date = parse_iso_date(rule['endDate'])
+    if hasattr(end_date, 'date'):
+        end_date = end_date.date()
 
     # Safety counter to prevent infinite loops even if logic fails
     max_iterations = 1000 
@@ -120,7 +127,7 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
             break
 
         due_date = current_date
-        task_id = f"op{operation['id']}-rule{rule['id']}-{due_date.isoformat()}"
+        task_id = f"op{operation['id']}-rule{rule['id']}-{safe_isoformat(due_date)}"
         
         if task_id not in task_exceptions:
             status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
@@ -130,7 +137,7 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
                 'operationId': operation['id'],
                 'ruleId': rule['id'],
                 'ruleName': rule['name'],
-                'dueDate': due_date.isoformat() + "T00:00:00",
+                'dueDate': safe_isoformat(due_date) + "T00:00:00" if due_date else None,
                 'status': status,
                 'priority': rule.get('priority') or 'Média',
                 'notes': rule.get('description')
