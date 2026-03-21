@@ -421,8 +421,10 @@ def manage_operation(op_id):
                 if not old_op_row: return jsonify({"error": f"Operação com id {op_id} não encontrada."}), 404
                 old_op_db = format_row(old_op_row, cursor)
                 
-                cursor.execute("SELECT id FROM cri_cra_dev.crm.events WHERE operation_id = ?", (op_id,))
-                db_event_ids = {row.id for row in cursor.fetchall()}
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.events WHERE operation_id = ?", (op_id,))
+                db_events = {row.id: format_row(row, cursor) for row in cursor.fetchall()}
+                db_event_ids = set(db_events.keys())
+                
                 cursor.execute("SELECT id FROM cri_cra_dev.crm.rating_history WHERE operation_id = ?", (op_id,))
                 db_rh_ids = {row.id for row in cursor.fetchall()}
 
@@ -515,11 +517,27 @@ def manage_operation(op_id):
                             client_event_id_to_db_id_map[event.get('id')] = db_event_id
                             log_action(cursor, event.get('registeredBy'), 'CREATE', 'Event', db_event_id, f"Evento '{event.get('title')}' adicionado.")
                     else:
-                        cursor.execute(
-                            "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=? WHERE id=?",
-                            (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('id'))
+                        old_event = db_events[event.get('id')]
+                        def norm(v): return str(v).strip() if v is not None else ""
+                        def norm_date(v): return str(v)[:10] if v is not None else ""
+                        
+                        changed = (
+                            norm_date(event.get('date')) != norm_date(old_event.get('date')) or
+                            norm(event.get('type')) != norm(old_event.get('type')) or
+                            norm(event.get('title')) != norm(old_event.get('title')) or
+                            norm(event.get('description')) != norm(old_event.get('description')) or
+                            norm(event.get('registeredBy')) != norm(old_event.get('registered_by')) or
+                            norm(event.get('nextSteps')) != norm(old_event.get('next_steps')) or
+                            norm(event.get('completedTaskId')) != norm(old_event.get('completed_task_id')) or
+                            norm(event.get('attentionPoints')) != norm(old_event.get('attention_points'))
                         )
-                        log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
+                        
+                        if changed:
+                            cursor.execute(
+                                "UPDATE cri_cra_dev.crm.events SET date=?, type=?, title=?, description=?, registered_by=?, next_steps=?, completed_task_id=?, attention_points=? WHERE id=?",
+                                (event.get('date'), event.get('type'), event.get('title'), event.get('description'), event.get('registeredBy'), event.get('nextSteps'), event.get('completedTaskId'), event.get('attentionPoints'), event.get('id'))
+                            )
+                            log_action(cursor, event.get('registeredBy'), 'UPDATE', 'Event', event.get('id'), f"Evento '{event.get('title')}' atualizado.")
 
                 for rh in data.get('ratingHistory', []):
                     if rh.get('id') not in db_rh_ids:
