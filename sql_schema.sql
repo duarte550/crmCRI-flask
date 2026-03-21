@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS cri_cra_dev.crm.operations (
     monitoring_receivables_portfolio BOOLEAN,
     monitoring_construction_report BOOLEAN,
     monitoring_commercial_info BOOLEAN,
-    monitoring_spe_dfs BOOLEAN
+    monitoring_spe_dfs BOOLEAN,
+    status STRING COMMENT 'Status da operação (Ativa, Legado).',
+    description STRING COMMENT 'Descrição detalhada da operação.'
 ) COMMENT 'Tabela principal contendo todas as operações de crédito estruturado.';
 
 -- Tabela de Projetos: Entidades (imóveis, empreendimentos) associadas às operações.
@@ -178,7 +180,7 @@ CREATE TABLE IF NOT EXISTS cri_cra_dev.crm.change_requests (
     title STRING NOT NULL,
     description STRING NOT NULL,
     requester STRING NOT NULL,
-    status STRING NOT NULL DEFAULT 'pending' COMMENT 'Status da solicitação: pending, completed.',
+    status STRING NOT NULL COMMENT 'Status da solicitação: pending, completed.',
     created_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
 ) COMMENT 'Armazena solicitações de mudanças e novas funcionalidades feitas pelos usuários.';
