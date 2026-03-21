@@ -100,6 +100,7 @@ def fetch_full_operation(cursor, operation_id):
         },
         'description': operation_db.get('description'),
         'status': operation_db.get('status') or 'Ativa',
+        'movedToLegacyDate': safe_isoformat(operation_db.get('moved_to_legacy_date')),
         'notes': None # Initialize notes as None
     }
 
@@ -412,8 +413,8 @@ def sync_all_operations():
                 op_id = op.get('id')
                 if op_id:
                     cursor.execute(
-                        "INSERT INTO cri_cra_dev.crm.sync_queue (operation_id, data) VALUES (?, ?)",
-                        (op_id, json.dumps(op))
+                        "INSERT INTO cri_cra_dev.crm.sync_queue (operation_id, data, created_at, processed) VALUES (?, ?, ?, ?)",
+                        (op_id, json.dumps(op), datetime.now(), False)
                     )
         conn.commit()
         return jsonify({"status": "queued", "count": len(data)}), 200
@@ -486,8 +487,9 @@ def manage_operation(op_id):
                 final_maturity_date = parse_iso_date(data.get('maturityDate')) if 'maturityDate' in data else old_op_db.get('maturity_date')
                 final_description = data.get('description', old_op_db.get('description'))
                 final_status = data.get('status', old_op_db.get('status'))
+                final_moved_to_legacy_date = parse_iso_date(data.get('movedToLegacyDate')) if 'movedToLegacyDate' in data else old_op_db.get('moved_to_legacy_date')
 
-                cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, op_id) )
+                cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ?, moved_to_legacy_date = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, final_moved_to_legacy_date, op_id) )
                 
                 # Update notes if provided
                 if 'notes' in data:
