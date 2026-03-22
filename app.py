@@ -11,9 +11,12 @@ from collections import defaultdict
 import json
 import logging
 
+from master_groups import master_groups_bp
+
 # Configurações básicas de logging
 # Serve static files from 'dist' folder in production
 app = Flask(__name__, static_folder='../dist', static_url_path='')
+app.register_blueprint(master_groups_bp)
 logging.basicConfig(level=logging.INFO)
 
 # Run schema updates on startup
@@ -81,6 +84,7 @@ def fetch_full_operation(cursor, operation_id):
     operation_db = format_row(op_row, cursor)
     operation = {
         'id': operation_db['id'], 'name': operation_db['name'], 'area': operation_db['area'],
+        'masterGroupId': operation_db.get('master_group_id'),
         'operationType': operation_db['operation_type'],
         'maturityDate': safe_isoformat(operation_db.get('maturity_date')),
         'estimatedDate': safe_isoformat(operation_db.get('estimated_date')),
@@ -229,6 +233,7 @@ def manage_operations_collection():
                     op_id = op_db['id']
                     operations_map[op_id] = {
                         'id': op_id, 'name': op_db['name'], 'area': op_db['area'],
+                        'masterGroupId': op_db.get('master_group_id'),
                         'operationType': op_db['operation_type'],
                         'maturityDate': safe_isoformat(op_db.get('maturity_date')),
                         'estimatedDate': safe_isoformat(op_db.get('estimated_date')),
@@ -341,7 +346,7 @@ def manage_operations_collection():
                 est_date = parse_iso_date(data.get('estimatedDate'))
                 maturity_date = parse_iso_date(data.get('maturityDate'))
                 
-                cursor.execute( "INSERT INTO cri_cra_dev.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs, estimated_date, status, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['name'], data['area'], data['operationType'], maturity_date, data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'), est_date, data.get('status', 'Ativa'), data.get('description')) )
+                cursor.execute( "INSERT INTO cri_cra_dev.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs, estimated_date, status, description, master_group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['name'], data['area'], data['operationType'], maturity_date, data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'), est_date, data.get('status', 'Ativa'), data.get('description'), data.get('masterGroupId')) )
                 cursor.execute("SELECT id FROM cri_cra_dev.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
                 new_op_id = cursor.fetchone().id
                 
@@ -459,6 +464,13 @@ def _update_operation_db_internal(cursor, op_id, data):
             cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET frequency = ?, start_date = ? WHERE operation_id = ? AND name = 'Revisão Gerencial'", (new_politica_freq, start, op_id))
             log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'TaskRule', op_id, f"Frequência da Revisão Gerencial ajustada para {new_politica_freq}.")
 
+        # Update MasterGroup rating and cascade to other operations if applicable
+        final_master_group_id = data.get('masterGroupId', old_op_db.get('master_group_id'))
+        if final_master_group_id:
+            cursor.execute("UPDATE cri_cra_dev.crm.master_groups SET rating = ? WHERE id = ?", (new_rating_group, final_master_group_id))
+            cursor.execute("UPDATE cri_cra_dev.crm.operations SET rating_group = ? WHERE master_group_id = ? AND id != ?", (new_rating_group, final_master_group_id, op_id))
+            log_action(cursor, data.get('responsibleAnalyst', 'System'), 'UPDATE', 'MasterGroup', final_master_group_id, f"Rating do Master Group atualizado para {new_rating_group} via operação {op_id}.")
+
     cov = data.get('covenants', {})
     
     est_date_val = data.get('estimatedDate')
@@ -470,7 +482,9 @@ def _update_operation_db_internal(cursor, op_id, data):
     final_status = data.get('status', old_op_db.get('status'))
     final_moved_to_legacy_date = parse_iso_date(data.get('movedToLegacyDate')) if 'movedToLegacyDate' in data else old_op_db.get('moved_to_legacy_date')
 
-    cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ?, moved_to_legacy_date = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, final_moved_to_legacy_date, op_id) )
+    final_master_group_id = data.get('masterGroupId', old_op_db.get('master_group_id'))
+
+    cursor.execute( "UPDATE cri_cra_dev.crm.operations SET name = ?, area = ?, rating_operation = ?, rating_group = ?, watchlist = ?, ltv = ?, dscr = ?, estimated_date = ?, maturity_date = ?, responsible_analyst = ?, segmento = ?, description = ?, status = ?, moved_to_legacy_date = ?, master_group_id = ? WHERE id = ?", (data.get('name', old_op_db.get('name')), data.get('area', old_op_db.get('area')), data.get('ratingOperation', old_op_db.get('rating_operation')), new_rating_group, data.get('watchlist', old_op_db.get('watchlist')), cov.get('ltv', old_op_db.get('ltv')), cov.get('dscr', old_op_db.get('dscr')), final_est_date, final_maturity_date, data.get('responsibleAnalyst', old_op_db.get('responsible_analyst')), data.get('segmento', old_op_db.get('segmento')), final_description, final_status, final_moved_to_legacy_date, final_master_group_id, op_id) )
     
     if 'notes' in data:
         cursor.execute("SELECT 1 FROM cri_cra_dev.crm.operation_review_notes WHERE operation_id = ?", (op_id,))
@@ -626,6 +640,7 @@ def manage_operation(op_id):
         return jsonify({"error": str(e)}), 500
     finally:
         if conn: conn.close()
+@app.route('/api/operations/bulk-update', methods=['POST'])
 def bulk_update_operations():
     conn = get_db_connection()
     try:
@@ -636,7 +651,7 @@ def bulk_update_operations():
         with conn.cursor() as cursor:
             for op_data in operations:
                 try:
-                    update_operation_db(cursor, op_data['id'], op_data)
+                    _update_operation_db_internal(cursor, op_data['id'], op_data)
                     results['success'].append(op_data['id'])
                 except Exception as e:
                     app.logger.error(f"Error updating operation {op_data.get('id')}: {e}", exc_info=True)
