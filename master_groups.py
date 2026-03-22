@@ -67,7 +67,7 @@ def fetch_full_master_group(cursor, mg_id):
     cursor.execute("""
         SELECT a.*, o.name as operation_name 
         FROM cri_cra_dev.crm.audit_logs a
-        JOIN cri_cra_dev.crm.operations o ON a.operation_id = o.id
+        JOIN cri_cra_dev.crm.operations o ON a.entity_id = CAST(o.id AS STRING) AND a.entity_type = 'Operation'
         WHERE o.master_group_id = ?
         ORDER BY a.timestamp DESC
         LIMIT 10
@@ -75,12 +75,12 @@ def fetch_full_master_group(cursor, mg_id):
     recent_changes = [format_row(r, cursor) for r in cursor.fetchall()]
     mg['recentChanges'] = [{
         'id': c.get('id'),
-        'operationId': c.get('operation_id'),
+        'operationId': c.get('entity_id'),
         'operationName': c.get('operation_name'),
         'timestamp': safe_isoformat(c.get('timestamp')),
-        'user': c.get('user'),
+        'user': c.get('user_name'),
         'action': c.get('action'),
-        'entity': c.get('entity'),
+        'entity': c.get('entity_type'),
         'details': c.get('details')
     } for c in recent_changes]
     
