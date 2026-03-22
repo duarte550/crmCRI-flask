@@ -26,15 +26,21 @@ def fetch_full_master_group(cursor, mg_id):
     so_rows = [format_row(r, cursor) for r in cursor.fetchall()]
     mg['structuringOperations'] = []
     for so in so_rows:
+        cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so['id'],))
+        series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
         mg['structuringOperations'].append({
             'id': so['id'],
             'name': so['name'],
             'stage': so['stage'],
             'liquidationDate': safe_isoformat(so.get('liquidation_date')),
-            'rate': so.get('rate'),
-            'indexer': so.get('indexer'),
-            'volume': so.get('volume'),
-            'fund': so.get('fund')
+            'series': [{
+                'id': s['id'],
+                'name': s['name'],
+                'rate': s.get('rate'),
+                'indexer': s.get('indexer'),
+                'volume': s.get('volume'),
+                'fund': s.get('fund')
+            } for s in series_rows]
         })
         
     # Fetch contacts
@@ -98,7 +104,14 @@ def manage_master_groups():
                     cursor.execute("SELECT id, name FROM cri_cra_dev.crm.operations WHERE master_group_id = ?", (mg['id'],))
                     mg['operations'] = [format_row(r, cursor) for r in cursor.fetchall()]
                     cursor.execute("SELECT id, name, stage FROM cri_cra_dev.crm.structuring_operations WHERE master_group_id = ?", (mg['id'],))
-                    mg['structuringOperations'] = [format_row(r, cursor) for r in cursor.fetchall()]
+                    so_rows = [format_row(r, cursor) for r in cursor.fetchall()]
+                    for so in so_rows:
+                        cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so['id'],))
+                        series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
+                        so['series'] = [{
+                           'id': s['id'], 'name': s['name'], 'rate': s.get('rate'), 'indexer': s.get('indexer'), 'volume': s.get('volume'), 'fund': s.get('fund')
+                        } for s in series_rows]
+                    mg['structuringOperations'] = so_rows
                 return jsonify(mgs)
         elif request.method == 'POST':
             data = request.json
@@ -189,8 +202,16 @@ def add_structuring_operation(mg_id):
     try:
         data = request.json
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operations (master_group_id, name, stage, liquidation_date, rate, indexer, volume, fund) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                           (mg_id, data.get('name'), data.get('stage', 'conversa inicial'), parse_iso_date(data.get('liquidationDate')), data.get('rate'), data.get('indexer'), data.get('volume'), data.get('fund')))
+            cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operations (master_group_id, name, stage, liquidation_date) VALUES (?, ?, ?, ?)",
+                           (mg_id, data.get('name'), data.get('stage', 'conversa inicial'), parse_iso_date(data.get('liquidationDate'))))
+            cursor.execute("SELECT id FROM cri_cra_dev.crm.structuring_operations ORDER BY id DESC LIMIT 1")
+            new_id = cursor.fetchone().id
+            
+            series = data.get('series', [])
+            for s in series:
+                cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operation_series (structuring_operation_id, name, rate, indexer, volume, fund) VALUES (?, ?, ?, ?, ?, ?)",
+                               (new_id, s.get('name', 'Série Única'), s.get('rate'), s.get('indexer'), s.get('volume'), s.get('fund')))
+                
             conn.commit()
             return jsonify({"status": "success"}), 201
     except Exception as e:
@@ -210,6 +231,12 @@ def get_structuring_operations():
                 so['liquidationDate'] = safe_isoformat(so.get('liquidation_date'))
                 so['masterGroupName'] = so.get('master_group_name')
                 
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so['id'],))
+                series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
+                so['series'] = [{
+                    'id': s['id'], 'name': s['name'], 'rate': s.get('rate'), 'indexer': s.get('indexer'), 'volume': s.get('volume'), 'fund': s.get('fund')
+                } for s in series_rows]
+                
                 # Fetch recent events for this structuring operation
                 cursor.execute("SELECT * FROM cri_cra_dev.crm.events WHERE structuring_operation_id = ? ORDER BY date DESC LIMIT 3", (so['id'],))
                 events = [format_row(r, cursor) for r in cursor.fetchall()]
@@ -226,15 +253,53 @@ def get_structuring_operations():
     finally:
         if conn: conn.close()
 
-@master_groups_bp.route('/api/structuring-operations/<int:so_id>', methods=['PUT', 'DELETE'])
+@master_groups_bp.route('/api/structuring-operations/<int:so_id>', methods=['GET', 'PUT', 'DELETE'])
 def manage_structuring_operation(so_id):
     conn = get_db_connection()
     try:
-        if request.method == 'PUT':
+        if request.method == 'GET':
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT so.*, mg.name as master_group_name FROM cri_cra_dev.crm.structuring_operations so JOIN cri_cra_dev.crm.master_groups mg ON so.master_group_id = mg.id WHERE so.id = ?", (so_id,))
+                so_row = cursor.fetchone()
+                if not so_row:
+                    return jsonify({"error": "Not found"}), 404
+                    
+                so = format_row(so_row, cursor)
+                so['liquidationDate'] = safe_isoformat(so.get('liquidation_date'))
+                so['masterGroupName'] = so.get('master_group_name')
+                
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so_id,))
+                series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
+                so['series'] = [{
+                    'id': s['id'], 'name': s['name'], 'rate': s.get('rate'), 'indexer': s.get('indexer'), 'volume': s.get('volume'), 'fund': s.get('fund')
+                } for s in series_rows]
+                
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.events WHERE structuring_operation_id = ? ORDER BY date DESC", (so_id,))
+                events = [format_row(r, cursor) for r in cursor.fetchall()]
+                so['events'] = [{
+                    'id': e.get('id'), 'date': safe_isoformat(e.get('date')),
+                    'type': e.get('type'), 'title': e.get('title'), 'description': e.get('description'),
+                    'registeredBy': e.get('registered_by'), 'nextSteps': e.get('next_steps'),
+                    'isOrigination': e.get('is_origination') or False
+                } for e in events]
+                
+                # Fetch contacts from master group
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.master_group_contacts WHERE master_group_id = ?", (so['master_group_id'],))
+                so['contacts'] = [format_row(r, cursor) for r in cursor.fetchall()]
+                
+                return jsonify(so)
+        elif request.method == 'PUT':
             data = request.json
             with conn.cursor() as cursor:
-                cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET name=?, stage=?, liquidation_date=?, rate=?, indexer=?, volume=?, fund=? WHERE id=?",
-                               (data.get('name'), data.get('stage'), parse_iso_date(data.get('liquidationDate')), data.get('rate'), data.get('indexer'), data.get('volume'), data.get('fund'), so_id))
+                cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET name=?, stage=?, liquidation_date=? WHERE id=?",
+                               (data.get('name'), data.get('stage'), parse_iso_date(data.get('liquidationDate')), so_id))
+                               
+                cursor.execute("DELETE FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id=?", (so_id,))
+                series = data.get('series', [])
+                for s in series:
+                    cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operation_series (structuring_operation_id, name, rate, indexer, volume, fund) VALUES (?, ?, ?, ?, ?, ?)",
+                                   (so_id, s.get('name', 'Série Única'), s.get('rate'), s.get('indexer'), s.get('volume'), s.get('fund')))
+                                   
                 conn.commit()
                 return jsonify({"status": "success"}), 200
         elif request.method == 'DELETE':
