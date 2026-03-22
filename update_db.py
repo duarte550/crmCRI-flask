@@ -47,6 +47,20 @@ def update_schema():
             """)
             print("Table structuring_operations checked/created.")
 
+            print("Checking for new columns in structuring_operations...")
+            cursor.execute("DESCRIBE cri_cra_dev.crm.structuring_operations")
+            so_cols_all = [row.col_name for row in cursor.fetchall()]
+            if 'risk' not in so_cols_all:
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.structuring_operations ADD COLUMN risk STRING")
+                print("Added risk column.")
+            if 'temperature' not in so_cols_all:
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.structuring_operations ADD COLUMN temperature STRING")
+                print("Added temperature column.")
+            if 'is_active' not in so_cols_all:
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.structuring_operations ADD COLUMN is_active BOOLEAN")
+                cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET is_active = TRUE WHERE is_active IS NULL")
+                print("Added is_active column.")
+
             print("Ensuring structuring_operation_series table exists...")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cri_cra_dev.crm.structuring_operation_series (
@@ -176,6 +190,21 @@ def update_schema():
             cursor.execute("ALTER TABLE cri_cra_dev.crm.task_rules ALTER COLUMN start_date DROP NOT NULL")
             cursor.execute("ALTER TABLE cri_cra_dev.crm.task_rules ALTER COLUMN end_date DROP NOT NULL")
             print("Dates are now nullable.")
+
+            print("Checking if structuring_operation_id exists in task_rules...")
+            cursor.execute("DESCRIBE cri_cra_dev.crm.task_rules")
+            tr_columns = [row.col_name for row in cursor.fetchall()]
+            if 'structuring_operation_id' not in tr_columns:
+                print("Adding structuring_operation_id column...")
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.task_rules ADD COLUMN structuring_operation_id BIGINT")
+                print("Column added successfully.")
+            if 'is_origination' not in tr_columns:
+                print("Adding is_origination column...")
+                cursor.execute("ALTER TABLE cri_cra_dev.crm.task_rules ADD COLUMN is_origination BOOLEAN")
+                print("Column added successfully.")
+            
+            # Make operation_id nullable in task_rules
+            cursor.execute("ALTER TABLE cri_cra_dev.crm.task_rules ALTER COLUMN operation_id DROP NOT NULL")
 
             print("Ensuring operation_review_notes table exists...")
             cursor.execute("""

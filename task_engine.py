@@ -62,24 +62,34 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
     if rule['frequency'] != 'Sem Prazo' and (not rule.get('startDate') or not rule.get('endDate')):
         return []
 
+    # Detect if this is an operation or a structuring operation
+    is_struct_op = 'liquidationDate' in operation or 'structuringOperationId' in rule
+    op_id = operation['id']
+    id_prefix = f"sop{op_id}" if is_struct_op else f"op{op_id}"
+    
     # Handle 'Sem Prazo' tasks
     if rule['frequency'] == 'Sem Prazo':
-        task_id = f"op{operation['id']}-rule{rule['id']}-nodate"
+        task_id = f"{id_prefix}-rule{rule['id']}-nodate"
         if task_id in task_exceptions:
             return []
         
         status = 'Concluída' if task_id in completed_task_ids else 'Pendente'
         
-        tasks.append({
+        task_obj = {
             'id': task_id,
-            'operationId': operation['id'],
             'ruleId': rule['id'],
             'ruleName': rule['name'],
             'dueDate': None,
             'status': status,
             'priority': rule.get('priority') or 'Média',
             'notes': rule.get('description')
-        })
+        }
+        if is_struct_op:
+            task_obj['structuringOperationId'] = op_id
+        else:
+            task_obj['operationId'] = op_id
+            
+        tasks.append(task_obj)
         return tasks
 
     # Handle one-off 'Pontual' tasks
@@ -87,23 +97,28 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
         due_date = parse_iso_date(rule['startDate'])
         if hasattr(due_date, 'date'):
             due_date = due_date.date()
-        task_id = f"op{operation['id']}-rule{rule['id']}-{safe_isoformat(due_date)}"
+        task_id = f"{id_prefix}-rule{rule['id']}-{safe_isoformat(due_date)}"
 
         if task_id in task_exceptions:
             return []
         
-        status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
+        status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date and due_date < today else 'Pendente'
         
-        tasks.append({
+        task_obj = {
             'id': task_id,
-            'operationId': operation['id'],
             'ruleId': rule['id'],
             'ruleName': rule['name'],
             'dueDate': safe_isoformat(due_date) + "T00:00:00" if due_date else None,
             'status': status,
             'priority': rule.get('priority') or 'Média',
             'notes': rule.get('description')
-        })
+        }
+        if is_struct_op:
+            task_obj['structuringOperationId'] = op_id
+        else:
+            task_obj['operationId'] = op_id
+            
+        tasks.append(task_obj)
         return tasks
 
     # Handle recurring tasks
@@ -127,21 +142,26 @@ def generate_tasks_for_rule(operation, rule, task_exceptions):
             break
 
         due_date = current_date
-        task_id = f"op{operation['id']}-rule{rule['id']}-{safe_isoformat(due_date)}"
+        task_id = f"{id_prefix}-rule{rule['id']}-{safe_isoformat(due_date)}"
         
         if task_id not in task_exceptions:
             status = 'Concluída' if task_id in completed_task_ids else 'Atrasada' if due_date < today else 'Pendente'
 
-            tasks.append({
+            task_obj = {
                 'id': task_id,
-                'operationId': operation['id'],
                 'ruleId': rule['id'],
                 'ruleName': rule['name'],
                 'dueDate': safe_isoformat(due_date) + "T00:00:00" if due_date else None,
                 'status': status,
                 'priority': rule.get('priority') or 'Média',
                 'notes': rule.get('description')
-            })
+            }
+            if is_struct_op:
+                task_obj['structuringOperationId'] = op_id
+            else:
+                task_obj['operationId'] = op_id
+            
+            tasks.append(task_obj)
         
         next_date = get_next_date(current_date, rule['frequency'])
         

@@ -149,7 +149,8 @@ def fetch_full_operation(cursor, operation_id):
         'completedTaskId': e.get('completed_task_id'),
         'attentionPoints': e.get('attention_points'),
         'ourAttendees': e.get('our_attendees'),
-        'operationAttendees': e.get('operation_attendees')
+        'operationAttendees': e.get('operation_attendees'),
+        'isOrigination': e.get('is_origination') or False
     } for e in db_events]
 
     cursor.execute("SELECT * FROM cri_cra_dev.crm.task_rules WHERE operation_id = ?", (operation_id,))
@@ -269,7 +270,7 @@ def manage_operations_collection():
                 cursor.execute(f"SELECT * FROM cri_cra_dev.crm.events WHERE operation_id IN ({placeholders}) ORDER BY date DESC", op_ids)
                 for row in cursor.fetchall():
                     event_db = format_row(row, cursor)
-                    operations_map[row.operation_id]['events'].append({ 'id': event_db.get('id'), 'date': safe_isoformat(event_db.get('date')), 'type': event_db.get('type'), 'title': event_db.get('title'), 'description': event_db.get('description'), 'registeredBy': event_db.get('registered_by'), 'nextSteps': event_db.get('next_steps'), 'completedTaskId': event_db.get('completed_task_id') })
+                    operations_map[row.operation_id]['events'].append({ 'id': event_db.get('id'), 'date': safe_isoformat(event_db.get('date')), 'type': event_db.get('type'), 'title': event_db.get('title'), 'description': event_db.get('description'), 'registeredBy': event_db.get('registered_by'), 'nextSteps': event_db.get('next_steps'), 'completedTaskId': event_db.get('completed_task_id'), 'isOrigination': event_db.get('is_origination') or False })
 
                 cursor.execute(f"SELECT * FROM cri_cra_dev.crm.task_rules WHERE operation_id IN ({placeholders})", op_ids)
                 for row in cursor.fetchall():
@@ -349,6 +350,11 @@ def manage_operations_collection():
                 cursor.execute( "INSERT INTO cri_cra_dev.crm.operations (name, area, operation_type, maturity_date, responsible_analyst, review_frequency, call_frequency, df_frequency, segmento, rating_operation, rating_group, watchlist, ltv, dscr, monitoring_news, monitoring_fii_report, monitoring_operational_info, monitoring_receivables_portfolio, monitoring_construction_report, monitoring_commercial_info, monitoring_spe_dfs, estimated_date, status, description, master_group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (data['name'], data['area'], data['operationType'], maturity_date, data['responsibleAnalyst'], data['reviewFrequency'], data['callFrequency'], data['dfFrequency'], data['segmento'], data['ratingOperation'], data['ratingGroup'], data['watchlist'], data.get('covenants', {}).get('ltv'), data.get('covenants', {}).get('dscr'), dm.get('news'), dm.get('fiiReport'), dm.get('operationalInfo'), dm.get('receivablesPortfolio'), dm.get('monthlyConstructionReport'), dm.get('monthlyCommercialInfo'), dm.get('speDfs'), est_date, data.get('status', 'Ativa'), data.get('description'), data.get('masterGroupId')) )
                 cursor.execute("SELECT id FROM cri_cra_dev.crm.operations WHERE name = ? ORDER BY id DESC LIMIT 1", (data['name'],))
                 new_op_id = cursor.fetchone().id
+                
+                structuring_op_id = data.get('structuringOperationId')
+                if structuring_op_id:
+                    cursor.execute("UPDATE cri_cra_dev.crm.events SET operation_id = ?, is_origination = TRUE WHERE structuring_operation_id = ?", (new_op_id, structuring_op_id))
+                    cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET is_active = FALSE WHERE id = ?", (structuring_op_id,))
                 
                 # FIX: Handle saving projects and guarantees for new operations
                 for project in data.get('projects', []):

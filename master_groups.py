@@ -3,6 +3,8 @@ from db import get_db_connection
 from utils import safe_isoformat, parse_iso_date
 from datetime import datetime
 import logging
+from task_engine import generate_tasks_for_operation
+from collections import defaultdict
 
 master_groups_bp = Blueprint('master_groups', __name__)
 
@@ -66,6 +68,7 @@ def fetch_full_master_group(cursor, mg_id):
         'type': e.get('type'), 'title': e.get('title'), 'description': e.get('description'),
         'registeredBy': e.get('registered_by'), 'nextSteps': e.get('next_steps'),
         'isOrigination': e.get('is_origination') or False,
+        'completedTaskId': e.get('completed_task_id'),
         'operationName': e.get('operation_name') or e.get('structuring_operation_name')
     } for e in events]
     
@@ -202,10 +205,14 @@ def add_structuring_operation(mg_id):
     try:
         data = request.json
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operations (master_group_id, name, stage, liquidation_date) VALUES (?, ?, ?, ?)",
-                           (mg_id, data.get('name'), data.get('stage', 'conversa inicial'), parse_iso_date(data.get('liquidationDate'))))
+            cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operations (master_group_id, name, stage, liquidation_date, risk, temperature) VALUES (?, ?, ?, ?, ?, ?)",
+                           (mg_id, data.get('name'), data.get('stage', 'Conversa Inicial'), parse_iso_date(data.get('liquidationDate')), data.get('risk'), data.get('temperature')))
             cursor.execute("SELECT id FROM cri_cra_dev.crm.structuring_operations ORDER BY id DESC LIMIT 1")
             new_id = cursor.fetchone().id
+            
+            default_stages = ['Conversa Inicial', 'Term Sheet', 'Due Diligence', 'Aprovação', 'Liquidação']
+            for idx, sn in enumerate(default_stages):
+                cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operation_stages (structuring_operation_id, name, order_index, is_completed) VALUES (?, ?, ?, ?)", (new_id, sn, idx, False))
             
             series = data.get('series', [])
             for s in series:
@@ -230,6 +237,12 @@ def get_structuring_operations():
             for so in sos:
                 so['liquidationDate'] = safe_isoformat(so.get('liquidation_date'))
                 so['masterGroupName'] = so.get('master_group_name')
+                so['risk'] = so.get('risk')
+                so['temperature'] = so.get('temperature')
+                so['isActive'] = bool(so.get('is_active', True))
+                
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_stages WHERE structuring_operation_id = ? ORDER BY order_index", (so['id'],))
+                so['stages'] = [format_row(r, cursor) for r in cursor.fetchall()]
                 
                 cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so['id'],))
                 series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
@@ -244,8 +257,26 @@ def get_structuring_operations():
                     'id': e.get('id'), 'date': safe_isoformat(e.get('date')),
                     'type': e.get('type'), 'title': e.get('title'), 'description': e.get('description'),
                     'registeredBy': e.get('registered_by'), 'nextSteps': e.get('next_steps'),
-                    'isOrigination': e.get('is_origination') or False
+                    'completedTaskId': e.get('completed_task_id'),
+                    'isOrigination': e.get('is_origination') or False,
+                    'structuringOperationStageId': e.get('structuring_operation_stage_id')
                 } for e in events]
+                
+                # Fetch task rules
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.task_rules WHERE structuring_operation_id = ?", (so['id'],))
+                so['taskRules'] = [{
+                    'id': r.get('id'), 'name': r.get('name'), 'frequency': r.get('frequency'),
+                    'startDate': safe_isoformat(r.get('start_date')),
+                    'endDate': safe_isoformat(r.get('end_date')),
+                    'description': r.get('description'),
+                    'priority': r.get('priority')
+                } for r in [format_row(row, cursor) for row in cursor.fetchall()]]
+                
+                # Fetch task exceptions
+                cursor.execute("SELECT task_id FROM cri_cra_dev.crm.task_exceptions WHERE operation_id = ?", (so['id'],))  # Reusing operation_id column here for simplicity or creating a new one?
+                task_exceptions = {row.task_id for row in cursor.fetchall()}
+                
+                so['tasks'] = generate_tasks_for_operation(so, task_exceptions)
                 
             return jsonify(sos)
     except Exception as e:
@@ -267,6 +298,12 @@ def manage_structuring_operation(so_id):
                 so = format_row(so_row, cursor)
                 so['liquidationDate'] = safe_isoformat(so.get('liquidation_date'))
                 so['masterGroupName'] = so.get('master_group_name')
+                so['risk'] = so.get('risk')
+                so['temperature'] = so.get('temperature')
+                so['isActive'] = bool(so.get('is_active', True))
+                
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_stages WHERE structuring_operation_id = ? ORDER BY order_index", (so_id,))
+                so['stages'] = [format_row(r, cursor) for r in cursor.fetchall()]
                 
                 cursor.execute("SELECT * FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id = ?", (so_id,))
                 series_rows = [format_row(r, cursor) for r in cursor.fetchall()]
@@ -280,8 +317,26 @@ def manage_structuring_operation(so_id):
                     'id': e.get('id'), 'date': safe_isoformat(e.get('date')),
                     'type': e.get('type'), 'title': e.get('title'), 'description': e.get('description'),
                     'registeredBy': e.get('registered_by'), 'nextSteps': e.get('next_steps'),
-                    'isOrigination': e.get('is_origination') or False
+                    'completedTaskId': e.get('completed_task_id'),
+                    'isOrigination': e.get('is_origination') or False,
+                    'structuringOperationStageId': e.get('structuring_operation_stage_id')
                 } for e in events]
+                
+                # Fetch task rules
+                cursor.execute("SELECT * FROM cri_cra_dev.crm.task_rules WHERE structuring_operation_id = ?", (so_id,))
+                so['taskRules'] = [{
+                    'id': r.get('id'), 'name': r.get('name'), 'frequency': r.get('frequency'),
+                    'startDate': safe_isoformat(r.get('start_date')),
+                    'endDate': safe_isoformat(r.get('end_date')),
+                    'description': r.get('description'),
+                    'priority': r.get('priority')
+                } for r in [format_row(row, cursor) for row in cursor.fetchall()]]
+                
+                # Fetch task exceptions
+                cursor.execute("SELECT task_id FROM cri_cra_dev.crm.task_exceptions WHERE operation_id = ?", (so_id,)) 
+                task_exceptions = {row.task_id for row in cursor.fetchall()}
+                
+                so['tasks'] = generate_tasks_for_operation(so, task_exceptions)
                 
                 # Fetch contacts from master group
                 cursor.execute("SELECT * FROM cri_cra_dev.crm.master_group_contacts WHERE master_group_id = ?", (so['master_group_id'],))
@@ -291,14 +346,41 @@ def manage_structuring_operation(so_id):
         elif request.method == 'PUT':
             data = request.json
             with conn.cursor() as cursor:
-                cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET name=?, stage=?, liquidation_date=? WHERE id=?",
-                               (data.get('name'), data.get('stage'), parse_iso_date(data.get('liquidationDate')), so_id))
+                is_active_val = data.get('isActive')
+                if is_active_val is None:
+                    is_active_val = True
+
+                cursor.execute("UPDATE cri_cra_dev.crm.structuring_operations SET name=?, stage=?, liquidation_date=?, risk=?, temperature=?, is_active=? WHERE id=?",
+                               (data.get('name'), data.get('stage'), parse_iso_date(data.get('liquidationDate')), data.get('risk'), data.get('temperature'), is_active_val, so_id))
                                
                 cursor.execute("DELETE FROM cri_cra_dev.crm.structuring_operation_series WHERE structuring_operation_id=?", (so_id,))
                 series = data.get('series', [])
                 for s in series:
                     cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operation_series (structuring_operation_id, name, rate, indexer, volume, fund) VALUES (?, ?, ?, ?, ?, ?)",
                                    (so_id, s.get('name', 'Série Única'), s.get('rate'), s.get('indexer'), s.get('volume'), s.get('fund')))
+                                   
+                # Update task rules
+                if 'taskRules' in data:
+                    cursor.execute("SELECT id, name FROM cri_cra_dev.crm.task_rules WHERE structuring_operation_id = ?", (so_id,))
+                    db_rules_map = {row.id: row.name for row in cursor.fetchall()}
+                    client_rule_ids = {r['id'] for r in data.get('taskRules', []) if 'id' in r and isinstance(r['id'], int)}
+
+                    for rule_id_to_delete in set(db_rules_map.keys()) - client_rule_ids:
+                        cursor.execute("DELETE FROM cri_cra_dev.crm.task_rules WHERE id = ?", (rule_id_to_delete,))
+
+                    for rule in data.get('taskRules', []):
+                        rule_id = rule.get('id')
+                        if rule_id and rule_id in db_rules_map:
+                            cursor.execute("UPDATE cri_cra_dev.crm.task_rules SET name=?, frequency=?, start_date=?, end_date=?, description=?, priority=? WHERE id=?", 
+                                           (rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média', rule_id))
+                        elif not rule_id or rule_id not in db_rules_map:
+                            cursor.execute("INSERT INTO cri_cra_dev.crm.task_rules (structuring_operation_id, name, frequency, start_date, end_date, description, priority, is_origination) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                                           (so_id, rule.get('name'), rule.get('frequency'), rule.get('startDate'), rule.get('endDate'), rule.get('description'), rule.get('priority') or 'Média', True))
+                                           
+                if 'taskExceptions' in data:
+                    cursor.execute("DELETE FROM cri_cra_dev.crm.task_exceptions WHERE operation_id = ?", (so_id,))
+                    for task_id in data['taskExceptions']:
+                        cursor.execute("INSERT INTO cri_cra_dev.crm.task_exceptions (operation_id, task_id) VALUES (?, ?)", (so_id, task_id))
                                    
                 conn.commit()
                 return jsonify({"status": "success"}), 200
@@ -333,10 +415,27 @@ def add_structuring_operation_event(so_id):
     try:
         data = request.json
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO cri_cra_dev.crm.events (structuring_operation_id, date, type, title, description, registered_by, next_steps, is_origination) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                           (so_id, parse_iso_date(data.get('date')), data.get('type'), data.get('title'), data.get('description'), data.get('registeredBy'), data.get('nextSteps'), True))
+            cursor.execute("INSERT INTO cri_cra_dev.crm.events (structuring_operation_id, date, type, title, description, registered_by, next_steps, is_origination, structuring_operation_stage_id, completed_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (so_id, parse_iso_date(data.get('date')), data.get('type'), data.get('title'), data.get('description'), data.get('registeredBy'), data.get('nextSteps'), True, data.get('structuringOperationStageId'), data.get('completedTaskId')))
             conn.commit()
             return jsonify({"status": "success"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn: conn.close()
+
+@master_groups_bp.route('/api/structuring-operations/<int:so_id>/stages', methods=['PUT'])
+def update_structuring_operation_stages(so_id):
+    conn = get_db_connection()
+    try:
+        stages = request.json.get('stages', [])
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM cri_cra_dev.crm.structuring_operation_stages WHERE structuring_operation_id=?", (so_id,))
+            for s in stages:
+                cursor.execute("INSERT INTO cri_cra_dev.crm.structuring_operation_stages (structuring_operation_id, name, order_index, is_completed) VALUES (?, ?, ?, ?)",
+                               (so_id, s.get('name'), s.get('order_index', 0), s.get('isCompleted', False)))
+            conn.commit()
+            return jsonify({"status": "success"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
