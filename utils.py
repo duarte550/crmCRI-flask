@@ -31,3 +31,7 @@ def parse_iso_date(val):
             return datetime.strptime(val, '%Y-%m-%d')
     except Exception:
         return val # Fallback to string if parsing fails
+
+def format_row(row, cursor):
+    """ Converts a cursor row into a dict using cursor.description """
+    return {desc[0]: value for desc, value in zip(cursor.description, row)}
